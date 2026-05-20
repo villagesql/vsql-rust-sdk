@@ -1,0 +1,10 @@
+[package]
+name = "vsql"
+version = "0.1.0"
+edition = "2021"
+description = "Safe Rust SDK for building VillageSQL extension functions (VDFs)"
+license = "GPL-2.0"
+
+[dependencies]
+vsql-sys = { path = "../vsql-sys" }
+paste = "1"

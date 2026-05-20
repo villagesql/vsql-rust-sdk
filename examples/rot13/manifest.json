@@ -1,0 +1,7 @@
+{
+  "name": "rot13",
+  "version": "0.1.0",
+  "description": "Example VillageSQL extension: provides vsql_rot13(STRING) -> STRING",
+  "author": "VillageSQL Community",
+  "license": "GPL-2.0"
+}

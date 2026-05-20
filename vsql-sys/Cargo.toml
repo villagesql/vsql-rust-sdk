@@ -1,0 +1,9 @@
+[package]
+name = "vsql-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Raw FFI bindings for the VillageSQL extension ABI"
+license = "GPL-2.0"
+
+[build-dependencies]
+bindgen = "0.71"

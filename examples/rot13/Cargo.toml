@@ -1,0 +1,12 @@
+[package]
+name = "rot13"
+version = "0.1.0"
+edition = "2021"
+description = "Example VillageSQL extension: rot13(STRING) -> STRING"
+license = "GPL-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vsql = { path = "../../vsql" }

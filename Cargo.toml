@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "vsql-sys",
+    "vsql",
+    "examples/rot13",
+]
+resolver = "2"
