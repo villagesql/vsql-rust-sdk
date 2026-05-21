@@ -4,10 +4,12 @@ members = [
     "vsql",
     "cargo-vsql",
     "examples/rot13",
+    "examples/rational",
 ]
 default-members = [
     "vsql-sys",
     "vsql",
     "examples/rot13",
+    "examples/rational",
 ]
 resolver = "2"

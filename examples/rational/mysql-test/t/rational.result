@@ -1,0 +1,120 @@
+INSTALL EXTENSION rational;
+# Storage: values are reduced to lowest terms, denominator always positive
+CREATE TABLE t1 (id INT, r rational);
+INSERT INTO t1 VALUES (1, '1/2'), (2, '2/4'), (3, '-3/6'), (4, '0/1');
+SELECT id, r FROM t1 ORDER BY id;
+id	r
+1	1/2
+2	1/2
+3	-1/2
+4	0/1
+# ORDER BY uses the compare function
+SELECT r FROM t1 ORDER BY r;
+r
+-1/2
+0/1
+1/2
+1/2
+DROP TABLE t1;
+# Arithmetic: addition
+SELECT rational_add('1/2', '1/3');
+rational_add('1/2', '1/3')
+5/6
+SELECT rational_add('1/4', '3/4');
+rational_add('1/4', '3/4')
+1/1
+SELECT rational_add('-1/2', '1/2');
+rational_add('-1/2', '1/2')
+0/1
+# Arithmetic: subtraction
+SELECT rational_sub('3/4', '1/4');
+rational_sub('3/4', '1/4')
+1/2
+SELECT rational_sub('1/2', '1/3');
+rational_sub('1/2', '1/3')
+1/6
+# Arithmetic: multiplication
+SELECT rational_mul('2/3', '3/4');
+rational_mul('2/3', '3/4')
+1/2
+SELECT rational_mul('3/1', '1/3');
+rational_mul('3/1', '1/3')
+1/1
+# Arithmetic: division
+SELECT rational_div('1/2', '1/4');
+rational_div('1/2', '1/4')
+2/1
+SELECT rational_div('2/3', '4/3');
+rational_div('2/3', '4/3')
+1/2
+# Division by zero produces an error
+SELECT rational_div('1/2', '0/1');
+ERROR HY000: VDF error in function 'rational_div': rational_div: division by zero
+# Accessor functions
+SELECT rational_numer('7/8'), rational_denom('7/8');
+rational_numer('7/8')	rational_denom('7/8')
+7	8
+SELECT rational_numer('-3/5'), rational_denom('-3/5');
+rational_numer('-3/5')	rational_denom('-3/5')
+-3	5
+# Conversion to real
+SELECT rational_to_real('1/4');
+rational_to_real('1/4')
+0.25
+SELECT rational_to_real('1/3');
+rational_to_real('1/3')
+0.3333333333333333
+# NULL propagation
+SELECT rational_add(NULL, '1/2');
+rational_add(NULL, '1/2')
+NULL
+SELECT rational_numer(NULL);
+rational_numer(NULL)
+NULL
+SELECT rational_to_real(NULL);
+rational_to_real(NULL)
+NULL
+# Compound arithmetic: (1/2 + 1/3) * 6/1 = 5/1
+SELECT rational_mul(rational_add('1/2', '1/3'), '6/1');
+rational_mul(rational_add('1/2', '1/3'), '6/1')
+5/1
+# Type-level VDFs: from_string
+SELECT rational::from_string('3/6');
+rational::from_string('3/6')
+1/2
+SELECT rational::from_string('-4/8');
+rational::from_string('-4/8')
+-1/2
+SELECT rational::from_string('0/5');
+rational::from_string('0/5')
+0/1
+SELECT rational::from_string(NULL);
+rational::from_string(NULL)
+NULL
+SELECT rational::from_string('not-a-rational');
+ERROR HY000: VDF error in function 'rational::from_string': rational: expected 'n/d', got "not-a-rational"
+# Type-level VDFs: to_string
+SELECT rational::to_string(rational::from_string('7/14'));
+rational::to_string(rational::from_string('7/14'))
+1/2
+SELECT rational::to_string(NULL);
+rational::to_string(NULL)
+NULL
+# Type-level VDFs: compare
+SELECT rational::compare(rational::from_string('1/3'), rational::from_string('1/2'));
+rational::compare(rational::from_string('1/3'), rational::from_string('1/2'))
+-1
+SELECT rational::compare(rational::from_string('1/2'), rational::from_string('2/4'));
+rational::compare(rational::from_string('1/2'), rational::from_string('2/4'))
+0
+SELECT rational::compare(rational::from_string('3/4'), rational::from_string('1/3'));
+rational::compare(rational::from_string('3/4'), rational::from_string('1/3'))
+1
+# Type-level VDFs: hash
+SELECT rational::hash(rational::from_string('1/2')) = rational::hash(rational::from_string('2/4'));
+rational::hash(rational::from_string('1/2')) = rational::hash(rational::from_string('2/4'))
+1
+SELECT rational::hash(NULL);
+rational::hash(NULL)
+NULL
+UNINSTALL EXTENSION rational;

@@ -1,0 +1,12 @@
+[package]
+name = "rational"
+version = "0.1.0"
+edition = "2021"
+description = "Example VillageSQL extension: rational number custom type"
+license = "GPL-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vsql = { path = "../../vsql" }
