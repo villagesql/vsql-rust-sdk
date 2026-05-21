@@ -1,0 +1,17 @@
+[package]
+name = "cargo-vsql"
+version = "0.1.0"
+edition = "2021"
+description = "Cargo subcommand for building, packaging, and testing VillageSQL extensions"
+license = "GPL-2.0"
+
+[[bin]]
+name = "cargo-vsql"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+tar = "0.4"
+toml = "0.8"

@@ -14,11 +14,11 @@ pub use vsql_sys as sys;
 use std::ffi::c_char;
 use vsql_sys::{
     vef_func_desc_t, vef_protocol_t_VEF_PROTOCOL_2, vef_registration_t,
-    vef_signature_t, vef_type_t, vef_version_t,
-    vef_type_id_VEF_TYPE_INT, vef_type_id_VEF_TYPE_REAL, vef_type_id_VEF_TYPE_STRING,
     vef_return_value_type_t_VEF_RESULT_ERROR, vef_return_value_type_t_VEF_RESULT_NULL,
     vef_return_value_type_t_VEF_RESULT_VALUE, vef_return_value_type_t_VEF_RESULT_WARNING,
-    vef_vdf_args_t, vef_vdf_result_t, VEF_MAX_ERROR_LEN,
+    vef_signature_t, vef_type_id_VEF_TYPE_INT, vef_type_id_VEF_TYPE_REAL,
+    vef_type_id_VEF_TYPE_STRING, vef_type_t, vef_vdf_args_t, vef_vdf_result_t, vef_version_t,
+    VEF_MAX_ERROR_LEN,
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -74,12 +74,24 @@ pub enum VdfReturn {
 }
 
 impl VdfReturn {
-    pub fn null() -> Self { Self::Null }
-    pub fn string(s: impl Into<std::string::String>) -> Self { Self::String(s.into()) }
-    pub fn real(v: f64) -> Self { Self::Real(v) }
-    pub fn int(v: i64) -> Self { Self::Int(v) }
-    pub fn warning(msg: impl Into<std::string::String>) -> Self { Self::Warning(msg.into()) }
-    pub fn error(msg: impl Into<std::string::String>) -> Self { Self::Error(msg.into()) }
+    pub fn null() -> Self {
+        Self::Null
+    }
+    pub fn string(s: impl Into<std::string::String>) -> Self {
+        Self::String(s.into())
+    }
+    pub fn real(v: f64) -> Self {
+        Self::Real(v)
+    }
+    pub fn int(v: i64) -> Self {
+        Self::Int(v)
+    }
+    pub fn warning(msg: impl Into<std::string::String>) -> Self {
+        Self::Warning(msg.into())
+    }
+    pub fn error(msg: impl Into<std::string::String>) -> Self {
+        Self::Error(msg.into())
+    }
 }
 
 // ── Descriptor used by the extension! macro ──────────────────────────────────
@@ -122,8 +134,7 @@ pub unsafe fn dispatch_vdf(
 
     // Protocol 2: values is an array of *mut vef_invalue_t pointers.
     let value_count = args.value_count as usize;
-    let raw_vals =
-        std::slice::from_raw_parts(args.__bindgen_anon_1.values, value_count);
+    let raw_vals = std::slice::from_raw_parts(args.__bindgen_anon_1.values, value_count);
 
     let mut in_values: Vec<InValue> = Vec::with_capacity(value_count);
     for &ptr in raw_vals {
@@ -139,12 +150,8 @@ pub unsafe fn dispatch_vdf(
                 // VillageSQL guarantees UTF-8 for STRING columns.
                 InValue::String(std::str::from_utf8_unchecked(bytes))
             }
-            t if t == vef_type_id_VEF_TYPE_REAL => {
-                InValue::Real(v.__bindgen_anon_1.real_value)
-            }
-            t if t == vef_type_id_VEF_TYPE_INT => {
-                InValue::Int(v.__bindgen_anon_1.int_value)
-            }
+            t if t == vef_type_id_VEF_TYPE_REAL => InValue::Real(v.__bindgen_anon_1.real_value),
+            t if t == vef_type_id_VEF_TYPE_INT => InValue::Int(v.__bindgen_anon_1.int_value),
             _ => InValue::Null,
         };
         in_values.push(iv);
@@ -267,8 +274,7 @@ pub unsafe fn free_registration(registration: *mut vef_registration_t) {
     }
     let reg = Box::from_raw(registration);
 
-    let funcs =
-        std::slice::from_raw_parts_mut(reg.funcs, reg.func_count as usize);
+    let funcs = std::slice::from_raw_parts_mut(reg.funcs, reg.func_count as usize);
     for &func_ptr in funcs.iter() {
         let func = Box::from_raw(func_ptr);
         let sig = Box::from_raw(func.signature);
