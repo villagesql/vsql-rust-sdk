@@ -1,0 +1,37 @@
+name: test
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-build:
+    name: Tests Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Environment
+        run: |
+          sudo apt update
+          sudo apt install -y libclang-dev
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install cargo-vsql
+        run: cargo install --path cargo-vsql
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Package rot13 example
+        working-directory: examples/rot13
+        run: cargo vsql package
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rot13.veb
+          path: dist/rot13.veb
