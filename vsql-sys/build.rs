@@ -13,7 +13,8 @@ fn main() {
         .header(types_h.to_str().unwrap())
         .clang_arg(format!("-I{}", include_dir.display()))
         // types.h uses C++ typed enums (enum : unsigned int)
-        .clang_arg("-x").clang_arg("c++")
+        .clang_arg("-x")
+        .clang_arg("c++")
         .clang_arg("-std=c++17")
         // Only generate type/constant bindings; the storage.h free functions
         // are server-side symbols resolved at dlopen time, not link time.
