@@ -1,0 +1,52 @@
+INSTALL EXTENSION sdk_coverage;
+
+--echo # InValue::Int dispatch
+SELECT sdk_identity_int(42);
+SELECT sdk_identity_int(-100);
+SELECT sdk_identity_int(NULL);
+
+--echo # InValue::Real dispatch
+SELECT sdk_identity_real(1.5);
+SELECT sdk_identity_real(-2.5);
+SELECT sdk_identity_real(NULL);
+
+--echo # VdfReturn::Warning: negative returns NULL, non-negative returns value
+SELECT sdk_warn_if_negative(10);
+SELECT sdk_warn_if_negative(0);
+SELECT sdk_warn_if_negative(-5);
+SELECT sdk_warn_if_negative(NULL);
+
+--echo # Type: counter (i64, decimal string)
+SELECT counter::from_string('42');
+SELECT counter::from_string('-7');
+SELECT counter::from_string(NULL);
+--error ER_UDF_ERROR
+SELECT counter::from_string('not-a-number');
+SELECT counter::compare(counter::from_string('1'), counter::from_string('2'));
+SELECT counter::compare(counter::from_string('5'), counter::from_string('5'));
+SELECT counter::compare(counter::from_string('9'), counter::from_string('3'));
+
+--echo # Type: flag (bool, "true"/"false")
+SELECT flag::from_string('true');
+SELECT flag::from_string('false');
+SELECT flag::from_string(NULL);
+--error ER_UDF_ERROR
+SELECT flag::from_string('maybe');
+SELECT flag::compare(flag::from_string('false'), flag::from_string('true'));
+SELECT flag::compare(flag::from_string('true'), flag::from_string('true'));
+SELECT flag::compare(flag::from_string('true'), flag::from_string('false'));
+
+--echo # Two types in one extension: ORDER BY counter then flag
+CREATE TABLE t1 (id INT, c counter, f flag);
+INSERT INTO t1 VALUES (1, '10', 'true'), (2, '3', 'false'), (3, '10', 'false');
+SELECT id, c, f FROM t1 ORDER BY id;
+SELECT id, c, f FROM t1 ORDER BY c, f;
+DROP TABLE t1;
+
+--echo # Default values: omitted columns use the registered default
+CREATE TABLE t2 (id INT, c counter, f flag);
+INSERT INTO t2 (id) VALUES (1);
+SELECT id, c, f FROM t2;
+DROP TABLE t2;
+
+UNINSTALL EXTENSION sdk_coverage;
