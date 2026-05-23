@@ -77,6 +77,14 @@ fn extension_name(dir: &Path) -> Result<String> {
     let path = dir.join("Cargo.toml");
     let content =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let raw: toml::Value =
+        toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
+    if raw.get("workspace").is_some() && raw.get("package").is_none() {
+        bail!(
+            "{} is a workspace root, not an extension — run `cargo vsql` from within an extension directory (e.g. examples/rot13)",
+            path.display()
+        );
+    }
     let manifest: CargoManifest =
         toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
     Ok(manifest.package.name)
