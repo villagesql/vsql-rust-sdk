@@ -1,0 +1,11 @@
+[package]
+name = "sdk_coverage"
+version = "0.1.0"
+edition = "2021"
+description = "SDK coverage tests — exercises InValue/VdfReturn variants and multi-type registration"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vsql = { path = "../../vsql" }

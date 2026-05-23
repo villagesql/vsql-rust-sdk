@@ -5,11 +5,13 @@ members = [
     "cargo-vsql",
     "examples/rot13",
     "examples/rational",
+    "tests/sdk_coverage",
 ]
 default-members = [
     "vsql-sys",
     "vsql",
     "examples/rot13",
     "examples/rational",
+    "tests/sdk_coverage",
 ]
 resolver = "2"
