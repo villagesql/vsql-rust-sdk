@@ -193,7 +193,8 @@ fn run_tests(ext_dir: &Path, record: bool) -> Result<()> {
 
     let mut cmd = Command::new("perl");
     cmd.arg(&mtr)
-        .arg(format!("--suite={}", suite_dir.display()));
+        .arg(format!("--suite={}", suite_dir.display()))
+        .current_dir(mtr.parent().unwrap());
     if record {
         cmd.arg("--record");
     }
