@@ -155,7 +155,10 @@
 typedef enum : unsigned int {
   VEF_PROTOCOL_0,  // Not used
   VEF_PROTOCOL_1,  // Stable as of v0.0.1, likely to be deprecated.
-  VEF_PROTOCOL_2,  // Under development, not stable. Adds:
+  VEF_PROTOCOL_2,  // Deprecated. Was the unstable development version before
+                   // being promoted to VEF_PROTOCOL_3. The server rejects
+                   // extensions that declare this version.
+  VEF_PROTOCOL_3,  // Stable as of v0.0.4. Adds:
                    // + Add deterministic VDF attribute.
                    // + Add encode/decode/compare/hash VDF name fields to
                    //   vef_type_desc_t.

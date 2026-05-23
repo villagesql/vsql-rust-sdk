@@ -13,7 +13,7 @@ pub use vsql_sys as sys;
 
 use std::ffi::c_char;
 use vsql_sys::{
-    vef_func_desc_t, vef_protocol_t_VEF_PROTOCOL_2, vef_registration_t,
+    vef_func_desc_t, vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t,
     vef_return_value_type_t_VEF_RESULT_ERROR, vef_return_value_type_t_VEF_RESULT_NULL,
     vef_return_value_type_t_VEF_RESULT_VALUE, vef_return_value_type_t_VEF_RESULT_WARNING,
     vef_signature_t, vef_type_id_VEF_TYPE_INT, vef_type_id_VEF_TYPE_REAL,
@@ -120,7 +120,7 @@ unsafe impl Sync for FuncDescriptor {}
 
 // ── Internal runtime helpers (called by macro-generated code) ─────────────────
 
-/// Convert raw Protocol-2 VDF arguments into a `&[InValue]` slice and call `f`.
+/// Convert raw Protocol-3 VDF arguments into a `&[InValue]` slice and call `f`.
 ///
 /// # Safety
 /// Caller must ensure `args` and `result` are valid for the duration of the call.
@@ -132,7 +132,7 @@ pub unsafe fn dispatch_vdf(
     let args = &*args;
     let result = &mut *result;
 
-    // Protocol 2: values is an array of *mut vef_invalue_t pointers.
+    // Protocol 3: values is an array of *mut vef_invalue_t pointers.
     let value_count = args.value_count as usize;
     let raw_vals = std::slice::from_raw_parts(args.__bindgen_anon_1.values, value_count);
 
@@ -224,7 +224,7 @@ pub unsafe fn build_registration(descs: &[FuncDescriptor]) -> *mut vef_registrat
 
         // Function descriptor.
         let func = Box::new(vef_func_desc_t {
-            protocol: vef_protocol_t_VEF_PROTOCOL_2,
+            protocol: vef_protocol_t_VEF_PROTOCOL_3,
             name: d.sql_name,
             signature: sig_ptr,
             vdf: Some(d.trampoline),
@@ -243,7 +243,7 @@ pub unsafe fn build_registration(descs: &[FuncDescriptor]) -> *mut vef_registrat
     let funcs_ptr = Box::into_raw(funcs_box) as *mut *mut vef_func_desc_t;
 
     let reg = Box::new(vef_registration_t {
-        protocol: vef_protocol_t_VEF_PROTOCOL_2,
+        protocol: vef_protocol_t_VEF_PROTOCOL_3,
         error_msg: std::ptr::null_mut(),
         deprecated_extension_version: std::ptr::null(),
         sdk_version: vef_version_t {
