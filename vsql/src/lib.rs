@@ -358,8 +358,8 @@ pub unsafe fn build_registration(
         deprecated_extension_version: std::ptr::null(),
         sdk_version: vef_version_t {
             major: 0,
-            minor: 1,
-            patch: 0,
+            minor: 0,
+            patch: 1,
             extra: std::ptr::null(),
         },
         deprecated_extension_name: std::ptr::null(),
