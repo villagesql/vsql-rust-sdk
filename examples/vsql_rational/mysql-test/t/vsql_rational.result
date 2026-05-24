@@ -1,4 +1,4 @@
-INSTALL EXTENSION rational;
+INSTALL EXTENSION vsql_rational;
 # Storage: values are reduced to lowest terms, denominator always positive
 CREATE TABLE t1 (id INT, r rational);
 INSERT INTO t1 VALUES (1, '1/2'), (2, '2/4'), (3, '-3/6'), (4, '0/1');
@@ -124,4 +124,4 @@ rational::hash(rational::from_string('1/2')) = rational::hash(rational::from_str
 SELECT rational::hash(NULL);
 rational::hash(NULL)
 NULL
-UNINSTALL EXTENSION rational;
+UNINSTALL EXTENSION vsql_rational;

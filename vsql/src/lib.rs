@@ -6,8 +6,8 @@
 //! 2. Write a function with the signature `fn(&[InValue]) -> VdfReturn`.
 //! 3. Declare the extension with the [`extension!`] macro.
 //!
-//! See `examples/rot13` for a complete working function extension.
-//! See `examples/rational` for a complete working custom type extension.
+//! See `examples/vsql_rot13` for a complete working function extension.
+//! See `examples/vsql_rational` for a complete working custom type extension.
 
 pub use paste;
 pub use vsql_sys as sys;

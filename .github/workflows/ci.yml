@@ -39,10 +39,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: rot13
-            dir: examples/rot13
-          - name: rational
-            dir: examples/rational
+          - name: vsql_rot13
+            dir: examples/vsql_rot13
+          - name: vsql_rational
+            dir: examples/vsql_rational
           - name: sdk_coverage
             dir: tests/sdk_coverage
 

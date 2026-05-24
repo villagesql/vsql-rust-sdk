@@ -1,6 +1,6 @@
 use vsql::{InValue, VdfReturn};
 
-/// SQL: vsql_rot13(s STRING) -> STRING
+/// SQL: rot13(s STRING) -> STRING
 ///
 /// Returns the ROT-13 encoding of the input string. Non-ASCII bytes are passed
 /// through unchanged. NULL input produces NULL output.
@@ -8,7 +8,7 @@ fn rot13_impl(args: &[InValue]) -> VdfReturn {
     match args.first() {
         Some(InValue::String(s)) => VdfReturn::string(rot13(s)),
         Some(InValue::Null) | None => VdfReturn::null(),
-        _ => VdfReturn::error("vsql_rot13: expected a STRING argument"),
+        _ => VdfReturn::error("rot13: expected a STRING argument"),
     }
 }
 
@@ -24,6 +24,6 @@ fn rot13(s: &str) -> String {
 
 vsql::extension! {
     funcs: [
-        vsql::func!(rot13_impl, "vsql_rot13", [vsql::Type::String] -> vsql::Type::String),
+        vsql::func!(rot13_impl, "rot13", [vsql::Type::String] -> vsql::Type::String),
     ]
 }
