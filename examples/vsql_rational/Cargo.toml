@@ -1,8 +1,8 @@
 [package]
-name = "rot13"
+name = "vsql_rational"
 version = "0.1.0"
 edition = "2021"
-description = "Example VillageSQL extension: rot13(STRING) -> STRING"
+description = "Example VillageSQL extension: rational number custom type"
 license = "GPL-2.0"
 
 [lib]

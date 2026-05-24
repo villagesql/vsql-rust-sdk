@@ -1,0 +1,36 @@
+INSTALL EXTENSION vsql_rot13;
+# Basic ASCII rotation
+SELECT rot13('Hello, World!');
+rot13('Hello, World!')
+Uryyb, Jbeyq!
+# rot13 is its own inverse
+SELECT rot13(rot13('Hello, World!'));
+rot13(rot13('Hello, World!'))
+Hello, World!
+# Uppercase and lowercase handled independently
+SELECT rot13('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz');
+rot13('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz')
+NOPQRSTUVWXYZABCDEFGHIJKLMnopqrstuvwxyzabcdefghijklm
+# Numbers and punctuation pass through unchanged
+SELECT rot13('abc123!@#');
+rot13('abc123!@#')
+nop123!@#
+# Empty string
+SELECT rot13('');
+rot13('')
+
+# NULL input produces NULL output
+SELECT rot13(NULL);
+rot13(NULL)
+NULL
+# Works over a table column
+CREATE TABLE t1 (s VARCHAR(100));
+INSERT INTO t1 VALUES ('Hello'), ('World'), (NULL), ('rot13 test 123');
+SELECT rot13(s) FROM t1 ORDER BY s;
+rot13(s)
+NULL
+Uryyb
+ebg13 grfg 123
+Jbeyq
+DROP TABLE t1;
+UNINSTALL EXTENSION vsql_rot13;

@@ -81,7 +81,7 @@ fn extension_name(dir: &Path) -> Result<String> {
         toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
     if raw.get("workspace").is_some() && raw.get("package").is_none() {
         bail!(
-            "{} is a workspace root, not an extension — run `cargo vsql` from within an extension directory (e.g. examples/rot13)",
+            "{} is a workspace root, not an extension — run `cargo vsql` from within an extension directory (e.g. examples/vsql_rot13)",
             path.display()
         );
     }
@@ -113,8 +113,9 @@ fn workspace_root(start: &Path) -> Result<PathBuf> {
 // TODO(villagesql-windows): handle dlls
 fn find_lib(name: &str, workspace_root: &Path) -> Result<PathBuf> {
     let release_dir = workspace_root.join("target").join("release");
+    let lib_name = name.replace('-', "_");
     for ext in ["so", "dylib"] {
-        let candidate = release_dir.join(format!("lib{name}.{ext}"));
+        let candidate = release_dir.join(format!("lib{lib_name}.{ext}"));
         if candidate.exists() {
             return Ok(candidate);
         }
