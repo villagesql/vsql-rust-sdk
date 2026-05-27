@@ -1,6 +1,6 @@
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
-use vsql::{InValue, VdfReturn};
+use villagesql::{InValue, VdfReturn};
 
 // ── Identity functions ────────────────────────────────────────────────────────
 
@@ -84,17 +84,17 @@ pub fn flag_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 
 // ── Extension registration ────────────────────────────────────────────────────
 
-vsql::extension! {
+villagesql::extension! {
     funcs: [
-        vsql::func!(sdk_identity_int_impl, "sdk_identity_int",
-            [vsql::Type::Int] -> vsql::Type::Int),
-        vsql::func!(sdk_identity_real_impl, "sdk_identity_real",
-            [vsql::Type::Real] -> vsql::Type::Real),
-        vsql::func!(sdk_warn_if_negative_impl, "sdk_warn_if_negative",
-            [vsql::Type::Int] -> vsql::Type::Int),
+        villagesql::func!(sdk_identity_int_impl, "sdk_identity_int",
+            [villagesql::Type::Int] -> villagesql::Type::Int),
+        villagesql::func!(sdk_identity_real_impl, "sdk_identity_real",
+            [villagesql::Type::Real] -> villagesql::Type::Real),
+        villagesql::func!(sdk_warn_if_negative_impl, "sdk_warn_if_negative",
+            [villagesql::Type::Int] -> villagesql::Type::Int),
     ],
     types: [
-        vsql::custom_type!(
+        villagesql::custom_type!(
             type_name: "counter",
             persisted_length: 8,
             max_decode_buffer_length: 20,
@@ -104,7 +104,7 @@ vsql::extension! {
             hash: counter_hash,
             default: "0",
         ),
-        vsql::custom_type!(
+        villagesql::custom_type!(
             type_name: "flag",
             persisted_length: 1,
             max_decode_buffer_length: 5,

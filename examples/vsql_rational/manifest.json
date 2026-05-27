@@ -1,6 +1,6 @@
 {
   "name": "vsql_rational",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Example VillageSQL extension: provides the rational custom SQL type",
   "author": "VillageSQL Community",
   "license": "GPL-2.0"

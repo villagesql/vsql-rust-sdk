@@ -90,7 +90,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Regenerate bindings
-        run: cargo build -p vsql-sys --features vsql-sys/regenerate-bindings
+        run: cargo build -p villagesql-sys --features villagesql-sys/regenerate-bindings
 
       - name: Fail if bindings differ from committed
         run: git diff --exit-code vsql-sys/src/bindings.rs
@@ -107,7 +107,7 @@ jobs:
   package:
     name: Package ${{ matrix.name }}
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, check-bindings]
     strategy:
       fail-fast: false
       matrix:

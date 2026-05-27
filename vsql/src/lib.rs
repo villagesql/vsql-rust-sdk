@@ -2,7 +2,7 @@
 //!
 //! # Quick start (functions)
 //!
-//! 1. Add `vsql = { path = "..." }` to your `Cargo.toml` with `crate-type = ["cdylib"]`.
+//! 1. Add `villagesql = "0.1"` to your `Cargo.toml` with `crate-type = ["cdylib"]`.
 //! 2. Write a function with the signature `fn(&[InValue]) -> VdfReturn`.
 //! 3. Declare the extension with the [`extension!`] macro.
 //!
@@ -10,10 +10,10 @@
 //! See `examples/vsql_rational` for a complete working custom type extension.
 
 pub use paste;
-pub use vsql_sys as sys;
+pub use villagesql_sys as sys;
 
 use std::ffi::c_char;
-use vsql_sys::{
+use villagesql_sys::{
     vef_func_desc_t, vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t,
     vef_return_value_type_t_VEF_RESULT_ERROR, vef_return_value_type_t_VEF_RESULT_NULL,
     vef_return_value_type_t_VEF_RESULT_VALUE, vef_return_value_type_t_VEF_RESULT_WARNING,
@@ -148,7 +148,7 @@ pub struct FuncDescriptor {
     pub params: &'static [Type],
     pub returns: Type,
     pub trampoline: unsafe extern "C" fn(
-        *mut vsql_sys::vef_context_t,
+        *mut villagesql_sys::vef_context_t,
         *mut vef_vdf_args_t,
         *mut vef_vdf_result_t,
     ),
@@ -425,7 +425,7 @@ pub unsafe fn free_registration(registration: *mut vef_registration_t) {
 /// Produce a [`Type::Custom`] value for the named custom type.
 ///
 /// ```ignore
-/// vsql::custom!("rational")   // → Type::Custom pointing to b"rational\0"
+/// villagesql::custom!("rational")   // → Type::Custom pointing to b"rational\0"
 /// ```
 #[macro_export]
 macro_rules! custom {
@@ -438,12 +438,12 @@ macro_rules! custom {
 /// `vef_unregister` C entry points.
 ///
 /// ```ignore
-/// vsql::extension! {
+/// villagesql::extension! {
 ///     funcs: [
-///         vsql::func!(my_impl, "sql_name", [vsql::Type::String] -> vsql::Type::String),
+///         villagesql::func!(my_impl, "sql_name", [villagesql::Type::String] -> villagesql::Type::String),
 ///     ],
 ///     types: [
-///         vsql::custom_type!(
+///         villagesql::custom_type!(
 ///             type_name: "my_type",
 ///             persisted_length: 8,
 ///             max_decode_buffer_length: 32,
@@ -494,8 +494,8 @@ macro_rules! extension {
 /// Build a [`FuncDescriptor`] for one VDF and generate its `extern "C"` trampoline.
 ///
 /// ```ignore
-/// vsql::func!(impl_fn, "sql_name", [vsql::Type::String] -> vsql::Type::String)
-/// vsql::func!(impl_fn, "sql_name", [vsql::custom!("my_type")] -> vsql::custom!("my_type"),
+/// villagesql::func!(impl_fn, "sql_name", [villagesql::Type::String] -> villagesql::Type::String)
+/// villagesql::func!(impl_fn, "sql_name", [villagesql::custom!("my_type")] -> villagesql::custom!("my_type"),
 ///             deterministic: true)
 /// ```
 #[macro_export]
@@ -543,7 +543,7 @@ macro_rules! func {
 /// - `hash`: `fn(&[u8]) -> usize`
 ///
 /// ```ignore
-/// vsql::custom_type!(
+/// villagesql::custom_type!(
 ///     type_name: "rational",
 ///     persisted_length: 16,
 ///     max_decode_buffer_length: 42,

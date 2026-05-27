@@ -3,7 +3,12 @@ name = "cargo-vsql"
 version = "0.1.0"
 edition = "2021"
 description = "Cargo subcommand for building, packaging, and testing VillageSQL extensions"
-license = "GPL-2.0"
+license = "GPL-2.0-only"
+repository = "https://github.com/villagesql/vsql-rust-sdk"
+homepage = "https://github.com/villagesql/vsql-rust-sdk"
+readme = "README.md"
+keywords = ["sql", "database", "extension", "cargo", "villagesql"]
+categories = ["database", "development-tools::cargo-plugins"]
 
 [[bin]]
 name = "cargo-vsql"

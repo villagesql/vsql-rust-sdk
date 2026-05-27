@@ -1,9 +1,12 @@
 [package]
-name = "vsql-sys"
+name = "villagesql-sys"
 version = "0.1.0"
 edition = "2021"
 description = "Raw FFI bindings for the VillageSQL extension ABI"
-license = "GPL-2.0"
+license = "GPL-2.0-only"
+repository = "https://github.com/villagesql/vsql-rust-sdk"
+homepage = "https://github.com/villagesql/vsql-rust-sdk"
+readme = "README.md"
 
 [features]
 regenerate-bindings = ["dep:bindgen"]
