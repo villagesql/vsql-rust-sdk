@@ -1,15 +1,15 @@
 [workspace]
 members = [
-    "vsql-sys",
-    "vsql",
+    "villagesql-sys",
+    "villagesql",
     "cargo-vsql",
     "examples/vsql_rot13",
     "examples/vsql_rational",
     "tests/sdk_coverage",
 ]
 default-members = [
-    "vsql-sys",
-    "vsql",
+    "villagesql-sys",
+    "villagesql",
     "examples/vsql_rot13",
     "examples/vsql_rational",
     "tests/sdk_coverage",

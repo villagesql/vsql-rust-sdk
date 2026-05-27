@@ -6,9 +6,9 @@ Write custom SQL functions (VDFs) for VillageSQL in safe Rust. The SDK handles a
 
 | Crate | Description |
 |-------|-------------|
-| [`villagesql`](vsql/README.md) | Safe Rust SDK for writing VDF extension functions |
+| [`villagesql`](villagesql/README.md) | Safe Rust SDK for writing VDF extension functions |
 | [`cargo-vsql`](cargo-vsql/README.md) | Cargo subcommand for packaging and testing extensions |
-| [`villagesql-sys`](vsql-sys/README.md) | Raw FFI bindings (used internally by `villagesql`) |
+| [`villagesql-sys`](villagesql-sys/README.md) | Raw FFI bindings (used internally by `villagesql`) |
 
 ## Prerequisites
 
@@ -42,7 +42,7 @@ resolver = "2"
 crate-type = ["cdylib"]
 
 [dependencies]
-villagesql = "0.1"
+villagesql = "0.0.1"
 ```
 
 ### 3. Write your function
@@ -87,7 +87,7 @@ cargo vsql install
 cargo vsql test
 ```
 
-For the full API reference see the [vsql README](vsql/README.md). For all `cargo vsql` commands see the [cargo-vsql README](cargo-vsql/README.md).
+For the full API reference see the [villagesql README](villagesql/README.md). For all `cargo vsql` commands see the [cargo-vsql README](cargo-vsql/README.md).
 
 ## Examples
 

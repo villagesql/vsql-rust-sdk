@@ -9,4 +9,4 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-villagesql = { path = "../../vsql" }
+villagesql = { path = "../../villagesql" }

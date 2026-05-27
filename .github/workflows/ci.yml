@@ -93,7 +93,7 @@ jobs:
         run: cargo build -p villagesql-sys --features villagesql-sys/regenerate-bindings
 
       - name: Fail if bindings differ from committed
-        run: git diff --exit-code vsql-sys/src/bindings.rs
+        run: git diff --exit-code villagesql-sys/src/bindings.rs
 
       - name: Install cargo-vsql
         run: cargo install --path cargo-vsql
