@@ -1,3 +1,5 @@
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+
 use vsql::{InValue, VdfReturn};
 
 // ── Binary layout ─────────────────────────────────────────────────────────────
@@ -37,13 +39,17 @@ fn normalize(num: i128, den: i128) -> Option<(i64, i64)> {
         return None;
     }
     let sign: i128 = if den < 0 { -1 } else { 1 };
-    let g = gcd(num.unsigned_abs(), den.unsigned_abs()) as i128;
+    let g = gcd(num.unsigned_abs(), den.unsigned_abs()).cast_signed();
     let n = sign * num / g;
     let d = sign * den / g;
-    if n < i64::MIN as i128 || n > i64::MAX as i128 || d < i64::MIN as i128 || d > i64::MAX as i128
+    if n < i128::from(i64::MIN)
+        || n > i128::from(i64::MAX)
+        || d < i128::from(i64::MIN)
+        || d > i128::from(i64::MAX)
     {
         return None;
     }
+    #[allow(clippy::cast_possible_truncation)]
     Some((n as i64, d as i64))
 }
 
@@ -52,16 +58,16 @@ fn normalize(num: i128, den: i128) -> Option<(i64, i64)> {
 pub fn rational_encode(s: &str) -> Result<Vec<u8>, String> {
     let (num_s, den_s) = s
         .split_once('/')
-        .ok_or_else(|| format!("rational: expected 'n/d', got {:?}", s))?;
+        .ok_or_else(|| format!("rational: expected 'n/d', got {s:?}"))?;
     let num: i64 = num_s
         .trim()
         .parse()
-        .map_err(|e| format!("rational numerator: {}", e))?;
+        .map_err(|e| format!("rational numerator: {e}"))?;
     let den: i64 = den_s
         .trim()
         .parse()
-        .map_err(|e| format!("rational denominator: {}", e))?;
-    let (n, d) = normalize(num as i128, den as i128)
+        .map_err(|e| format!("rational denominator: {e}"))?;
+    let (n, d) = normalize(i128::from(num), i128::from(den))
         .ok_or_else(|| "rational: zero or overflowing denominator".to_string())?;
     Ok(to_bytes(n, d))
 }
@@ -75,24 +81,27 @@ pub fn rational_decode(b: &[u8]) -> Result<String, String> {
         ));
     }
     let (n, d) = from_bytes(b);
-    Ok(format!("{}/{}", n, d))
+    Ok(format!("{n}/{d}"))
 }
 
+#[must_use]
 pub fn rational_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     let (n1, d1) = from_bytes(a);
     let (n2, d2) = from_bytes(b);
     // n1/d1 vs n2/d2  →  cross-multiply (denominators are always positive)
-    let lhs = (n1 as i128) * (d2 as i128);
-    let rhs = (n2 as i128) * (d1 as i128);
+    let lhs = i128::from(n1) * i128::from(d2);
+    let rhs = i128::from(n2) * i128::from(d1);
     lhs.cmp(&rhs)
 }
 
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
 pub fn rational_hash(b: &[u8]) -> usize {
     // FNV-1a over the 16 bytes
-    let mut h: usize = 0xcbf29ce484222325u64 as usize;
+    let mut h: usize = 0xcbf2_9ce4_8422_2325_u64 as usize;
     for &byte in b {
         h ^= byte as usize;
-        h = h.wrapping_mul(0x100000001b3u64 as usize);
+        h = h.wrapping_mul(0x0100_0000_01b3_u64 as usize);
     }
     h
 }
@@ -114,14 +123,14 @@ fn rational_add_impl(args: &[InValue]) -> VdfReturn {
     match (arg(args, 0), arg(args, 1)) {
         (Ok(Some((n1, d1))), Ok(Some((n2, d2)))) => {
             match normalize(
-                (n1 as i128) * (d2 as i128) + (n2 as i128) * (d1 as i128),
-                (d1 as i128) * (d2 as i128),
+                i128::from(n1) * i128::from(d2) + i128::from(n2) * i128::from(d1),
+                i128::from(d1) * i128::from(d2),
             ) {
                 Some((n, d)) => VdfReturn::Binary(to_bytes(n, d)),
                 None => VdfReturn::error("rational_add: overflow"),
             }
         }
-        (Err(e), _) | (_, Err(e)) => VdfReturn::error(format!("rational_add: {}", e)),
+        (Err(e), _) | (_, Err(e)) => VdfReturn::error(format!("rational_add: {e}")),
         _ => VdfReturn::null(),
     }
 }
@@ -130,14 +139,14 @@ fn rational_sub_impl(args: &[InValue]) -> VdfReturn {
     match (arg(args, 0), arg(args, 1)) {
         (Ok(Some((n1, d1))), Ok(Some((n2, d2)))) => {
             match normalize(
-                (n1 as i128) * (d2 as i128) - (n2 as i128) * (d1 as i128),
-                (d1 as i128) * (d2 as i128),
+                i128::from(n1) * i128::from(d2) - i128::from(n2) * i128::from(d1),
+                i128::from(d1) * i128::from(d2),
             ) {
                 Some((n, d)) => VdfReturn::Binary(to_bytes(n, d)),
                 None => VdfReturn::error("rational_sub: overflow"),
             }
         }
-        (Err(e), _) | (_, Err(e)) => VdfReturn::error(format!("rational_sub: {}", e)),
+        (Err(e), _) | (_, Err(e)) => VdfReturn::error(format!("rational_sub: {e}")),
         _ => VdfReturn::null(),
     }
 }
@@ -145,12 +154,15 @@ fn rational_sub_impl(args: &[InValue]) -> VdfReturn {
 fn rational_mul_impl(args: &[InValue]) -> VdfReturn {
     match (arg(args, 0), arg(args, 1)) {
         (Ok(Some((n1, d1))), Ok(Some((n2, d2)))) => {
-            match normalize((n1 as i128) * (n2 as i128), (d1 as i128) * (d2 as i128)) {
+            match normalize(
+                i128::from(n1) * i128::from(n2),
+                i128::from(d1) * i128::from(d2),
+            ) {
                 Some((n, d)) => VdfReturn::Binary(to_bytes(n, d)),
                 None => VdfReturn::error("rational_mul: overflow"),
             }
         }
-        (Err(e), _) | (_, Err(e)) => VdfReturn::error(format!("rational_mul: {}", e)),
+        (Err(e), _) | (_, Err(e)) => VdfReturn::error(format!("rational_mul: {e}")),
         _ => VdfReturn::null(),
     }
 }
@@ -161,12 +173,15 @@ fn rational_div_impl(args: &[InValue]) -> VdfReturn {
             if n2 == 0 {
                 return VdfReturn::error("rational_div: division by zero");
             }
-            match normalize((n1 as i128) * (d2 as i128), (d1 as i128) * (n2 as i128)) {
+            match normalize(
+                i128::from(n1) * i128::from(d2),
+                i128::from(d1) * i128::from(n2),
+            ) {
                 Some((n, d)) => VdfReturn::Binary(to_bytes(n, d)),
                 None => VdfReturn::error("rational_div: overflow"),
             }
         }
-        (Err(e), _) | (_, Err(e)) => VdfReturn::error(format!("rational_div: {}", e)),
+        (Err(e), _) | (_, Err(e)) => VdfReturn::error(format!("rational_div: {e}")),
         _ => VdfReturn::null(),
     }
 }
@@ -175,7 +190,7 @@ fn rational_numer_impl(args: &[InValue]) -> VdfReturn {
     match arg(args, 0) {
         Ok(Some((n, _))) => VdfReturn::Int(n),
         Ok(None) => VdfReturn::null(),
-        Err(e) => VdfReturn::error(format!("rational_numer: {}", e)),
+        Err(e) => VdfReturn::error(format!("rational_numer: {e}")),
     }
 }
 
@@ -183,15 +198,16 @@ fn rational_denom_impl(args: &[InValue]) -> VdfReturn {
     match arg(args, 0) {
         Ok(Some((_, d))) => VdfReturn::Int(d),
         Ok(None) => VdfReturn::null(),
-        Err(e) => VdfReturn::error(format!("rational_denom: {}", e)),
+        Err(e) => VdfReturn::error(format!("rational_denom: {e}")),
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn rational_to_real_impl(args: &[InValue]) -> VdfReturn {
     match arg(args, 0) {
         Ok(Some((n, d))) => VdfReturn::Real(n as f64 / d as f64),
         Ok(None) => VdfReturn::null(),
-        Err(e) => VdfReturn::error(format!("rational_to_real: {}", e)),
+        Err(e) => VdfReturn::error(format!("rational_to_real: {e}")),
     }
 }
 

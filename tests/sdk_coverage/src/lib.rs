@@ -1,3 +1,5 @@
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+
 use vsql::{InValue, VdfReturn};
 
 // ── Identity functions ────────────────────────────────────────────────────────
@@ -23,7 +25,7 @@ fn sdk_identity_real_impl(args: &[InValue]) -> VdfReturn {
 fn sdk_warn_if_negative_impl(args: &[InValue]) -> VdfReturn {
     match args.first() {
         Some(InValue::Int(v)) if *v < 0 => {
-            VdfReturn::warning(format!("sdk_warn_if_negative: {} is negative", v))
+            VdfReturn::warning(format!("sdk_warn_if_negative: {v} is negative"))
         }
         Some(InValue::Int(v)) => VdfReturn::Int(*v),
         Some(InValue::Null) | None => VdfReturn::null(),
@@ -34,7 +36,7 @@ fn sdk_warn_if_negative_impl(args: &[InValue]) -> VdfReturn {
 // ── Type 1: counter (wraps i64, decimal string representation) ────────────────
 
 pub fn counter_encode(s: &str) -> Result<Vec<u8>, String> {
-    let n: i64 = s.trim().parse().map_err(|e| format!("counter: {}", e))?;
+    let n: i64 = s.trim().parse().map_err(|e| format!("counter: {e}"))?;
     Ok(n.to_le_bytes().to_vec())
 }
 
@@ -45,12 +47,15 @@ pub fn counter_decode(b: &[u8]) -> Result<String, String> {
     Ok(i64::from_le_bytes(b[..8].try_into().unwrap()).to_string())
 }
 
+#[must_use]
 pub fn counter_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     let va = i64::from_le_bytes(a[..8].try_into().unwrap());
     let vb = i64::from_le_bytes(b[..8].try_into().unwrap());
     va.cmp(&vb)
 }
 
+#[must_use]
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 pub fn counter_hash(b: &[u8]) -> usize {
     i64::from_le_bytes(b[..8].try_into().unwrap()) as usize
 }
@@ -61,7 +66,7 @@ pub fn flag_encode(s: &str) -> Result<Vec<u8>, String> {
     match s.trim() {
         "true" => Ok(vec![1]),
         "false" => Ok(vec![0]),
-        other => Err(format!("flag: expected 'true' or 'false', got {:?}", other)),
+        other => Err(format!("flag: expected 'true' or 'false', got {other:?}")),
     }
 }
 
@@ -72,6 +77,7 @@ pub fn flag_decode(b: &[u8]) -> Result<String, String> {
     Ok(if b[0] != 0 { "true" } else { "false" }.to_string())
 }
 
+#[must_use]
 pub fn flag_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     a[0].cmp(&b[0])
 }

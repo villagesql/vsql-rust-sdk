@@ -1,4 +1,4 @@
-//! Safe Rust SDK for writing VillageSQL extension functions (VDFs) and custom types.
+//! Safe Rust SDK for writing `VillageSQL` extension functions (VDFs) and custom types.
 //!
 //! # Quick start (functions)
 //!
@@ -112,18 +112,22 @@ pub enum VdfReturn {
 }
 
 impl VdfReturn {
+    #[must_use]
     pub fn null() -> Self {
         Self::Null
     }
     pub fn string(s: impl Into<std::string::String>) -> Self {
         Self::String(s.into())
     }
+    #[must_use]
     pub fn real(v: f64) -> Self {
         Self::Real(v)
     }
+    #[must_use]
     pub fn int(v: i64) -> Self {
         Self::Int(v)
     }
+    #[must_use]
     pub fn binary(v: Vec<u8>) -> Self {
         Self::Binary(v)
     }
@@ -218,7 +222,7 @@ pub unsafe fn dispatch_vdf(
         let iv = match v.type_ {
             t if t == vef_type_id_VEF_TYPE_STRING => {
                 let anon = &v.__bindgen_anon_1.__bindgen_anon_1;
-                let bytes = std::slice::from_raw_parts(anon.str_value as *const u8, anon.str_len);
+                let bytes = std::slice::from_raw_parts(anon.str_value.cast::<u8>(), anon.str_len);
                 InValue::String(std::str::from_utf8_unchecked(bytes))
             }
             t if t == vef_type_id_VEF_TYPE_REAL => InValue::Real(v.__bindgen_anon_1.real_value),
@@ -246,7 +250,7 @@ unsafe fn write_result(ret: VdfReturn, result: &mut vef_vdf_result_t) {
             let anon = &mut result.__bindgen_anon_1.__bindgen_anon_1;
             let bytes = s.as_bytes();
             let n = bytes.len().min(anon.max_str_len);
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), anon.str_buf as *mut u8, n);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), anon.str_buf.cast::<u8>(), n);
             result.actual_len = n;
         }
         VdfReturn::Real(v) => {
@@ -278,13 +282,13 @@ unsafe fn write_result(ret: VdfReturn, result: &mut vef_vdf_result_t) {
 unsafe fn write_error_msg(msg: &[u8], buf: *mut c_char) {
     let max = (VEF_MAX_ERROR_LEN as usize).saturating_sub(1);
     let n = msg.len().min(max);
-    std::ptr::copy_nonoverlapping(msg.as_ptr(), buf as *mut u8, n);
+    std::ptr::copy_nonoverlapping(msg.as_ptr(), buf.cast::<u8>(), n);
     *buf.add(n) = 0;
 }
 
 unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
     let params: Box<[vef_type_t]> = d.params.iter().map(|t| t.to_raw()).collect();
-    let param_count = params.len() as u32;
+    let param_count = u32::try_from(params.len()).expect("param count exceeds u32");
     let params_ptr = Box::into_raw(params) as *const vef_type_t;
     let sig = Box::into_raw(Box::new(vef_signature_t {
         param_count,
@@ -307,8 +311,12 @@ unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
 
 /// Allocate a `vef_registration_t` from slices of descriptors.
 ///
+/// # Panics
+/// Panics if the number of functions or types exceeds `u32::MAX`.
+///
 /// # Safety
 /// All descriptor fields must be valid for `'static`.
+#[must_use]
 pub unsafe fn build_registration(
     funcs: &[FuncDescriptor],
     types: &[TypeWithFuncs],
@@ -323,8 +331,8 @@ pub unsafe fn build_registration(
             func_ptrs.push(build_func_ptr(d));
         }
     }
-    let func_count = func_ptrs.len() as u32;
-    let funcs_ptr = Box::into_raw(func_ptrs.into_boxed_slice()) as *mut *mut vef_func_desc_t;
+    let func_count = u32::try_from(func_ptrs.len()).expect("func count exceeds u32");
+    let funcs_ptr = Box::into_raw(func_ptrs.into_boxed_slice()).cast::<*mut vef_func_desc_t>();
 
     // ── Types ──────────────────────────────────────────────────────────────────
     let mut type_ptrs: Vec<*mut vef_type_desc_t> = Vec::with_capacity(types.len());
@@ -349,8 +357,8 @@ pub unsafe fn build_registration(
             max_persisted_length: 0,
         })));
     }
-    let type_count = type_ptrs.len() as u32;
-    let types_ptr = Box::into_raw(type_ptrs.into_boxed_slice()) as *mut *mut vef_type_desc_t;
+    let type_count = u32::try_from(type_ptrs.len()).expect("type count exceeds u32");
+    let types_ptr = Box::into_raw(type_ptrs.into_boxed_slice()).cast::<*mut vef_type_desc_t>();
 
     Box::into_raw(Box::new(vef_registration_t {
         protocol: vef_protocol_t_VEF_PROTOCOL_3,
@@ -388,7 +396,7 @@ pub unsafe fn free_registration(registration: *mut vef_registration_t) {
         let func = Box::from_raw(func_ptr);
         let sig = Box::from_raw(func.signature);
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-            sig.params as *mut vef_type_t,
+            sig.params.cast_mut(),
             sig.param_count as usize,
         )));
         drop(sig);
@@ -426,7 +434,7 @@ macro_rules! custom {
     };
 }
 
-/// Declare a VillageSQL extension and generate the `vef_register` /
+/// Declare a `VillageSQL` extension and generate the `vef_register` /
 /// `vef_unregister` C entry points.
 ///
 /// ```ignore
