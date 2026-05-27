@@ -3,7 +3,7 @@ use vsql::{InValue, VdfReturn};
 // ── Identity functions ────────────────────────────────────────────────────────
 
 fn sdk_identity_int_impl(args: &[InValue]) -> VdfReturn {
-    match args.get(0) {
+    match args.first() {
         Some(InValue::Int(v)) => VdfReturn::Int(*v),
         Some(InValue::Null) | None => VdfReturn::null(),
         _ => VdfReturn::error("sdk_identity_int: expected INT"),
@@ -11,7 +11,7 @@ fn sdk_identity_int_impl(args: &[InValue]) -> VdfReturn {
 }
 
 fn sdk_identity_real_impl(args: &[InValue]) -> VdfReturn {
-    match args.get(0) {
+    match args.first() {
         Some(InValue::Real(v)) => VdfReturn::Real(*v),
         Some(InValue::Null) | None => VdfReturn::null(),
         _ => VdfReturn::error("sdk_identity_real: expected REAL"),
@@ -21,7 +21,7 @@ fn sdk_identity_real_impl(args: &[InValue]) -> VdfReturn {
 // ── Warning function ──────────────────────────────────────────────────────────
 
 fn sdk_warn_if_negative_impl(args: &[InValue]) -> VdfReturn {
-    match args.get(0) {
+    match args.first() {
         Some(InValue::Int(v)) if *v < 0 => {
             VdfReturn::warning(format!("sdk_warn_if_negative: {} is negative", v))
         }

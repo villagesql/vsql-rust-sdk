@@ -387,14 +387,14 @@ pub unsafe fn free_registration(registration: *mut vef_registration_t) {
     for &func_ptr in funcs.iter() {
         let func = Box::from_raw(func_ptr);
         let sig = Box::from_raw(func.signature);
-        drop(Box::from_raw(std::slice::from_raw_parts_mut(
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
             sig.params as *mut vef_type_t,
             sig.param_count as usize,
         )));
         drop(sig);
         drop(func);
     }
-    drop(Box::from_raw(std::slice::from_raw_parts_mut(
+    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
         reg.funcs,
         reg.func_count as usize,
     )));
@@ -404,7 +404,7 @@ pub unsafe fn free_registration(registration: *mut vef_registration_t) {
     for &type_ptr in types.iter() {
         drop(Box::from_raw(type_ptr));
     }
-    drop(Box::from_raw(std::slice::from_raw_parts_mut(
+    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
         reg.types,
         reg.type_count as usize,
     )));
