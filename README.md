@@ -18,7 +18,7 @@ cargo install --path cargo-vsql
 
 ## Quick start
 
-The complete example lives in [`examples/rot13`](examples/rot13). The steps below walk through it.
+The complete example lives in [`examples/vsql_rot13`](examples/vsql_rot13). The steps below walk through it.
 
 ### 1. Create a new crate
 
@@ -92,24 +92,24 @@ cargo vsql install
 cargo vsql test
 ```
 
-## The rot13 example
+## The vsql_rot13 example
 
-[`examples/rot13`](examples/rot13) is a complete, minimal extension you can use as a template:
+[`examples/vsql_rot13`](examples/vsql_rot13) is a complete, minimal extension you can use as a template:
 
 ```
-examples/rot13/
+examples/vsql_rot13/
 ├── Cargo.toml          # crate-type = ["cdylib"]
 ├── manifest.json       # Extension metadata
 ├── src/lib.rs          # ~30 lines: rot13 impl + extension! declaration
 └── mysql-test/
     ├── suite.opt
-    └── t/rot13.test    # SQL test script
+    └── t/vsql_rot13.test    # SQL test script
 ```
 
 To build and run its tests:
 
 ```sh
-cd examples/rot13
+cd examples/vsql_rot13
 cargo vsql test
 ```
 
@@ -197,14 +197,14 @@ lib/<name>.so
 VillageSQL installs and loads this archive with:
 
 ```sql
-INSTALL EXTENSION rot13;
+INSTALL EXTENSION 'vsql_rot13';
 -- use the function --
-UNINSTALL EXTENSION rot13;
+UNINSTALL EXTENSION 'vsql_rot13';
 ```
 
 ## Writing tests
 
-Place a MySQL Test Framework suite under `mysql-test/` in your extension directory. See [`examples/rot13/mysql-test/t/rot13.test`](examples/rot13/mysql-test/t/rot13.test) for a reference test file that covers NULL handling, string operations, and table column inputs.
+Place a MySQL Test Framework suite under `mysql-test/` in your extension directory. See [`examples/vsql_rot13/mysql-test/t/vsql_rot13.test`](examples/vsql_rot13/mysql-test/t/vsql_rot13.test) for a reference test file that covers NULL handling, string operations, and table column inputs.
 
 Run with:
 
