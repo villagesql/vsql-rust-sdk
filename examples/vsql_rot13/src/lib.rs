@@ -1,4 +1,4 @@
-use vsql::{InValue, VdfReturn};
+use villagesql::{InValue, VdfReturn};
 
 /// SQL: rot13(s STRING) -> STRING
 ///
@@ -22,8 +22,8 @@ fn rot13(s: &str) -> String {
         .collect()
 }
 
-vsql::extension! {
+villagesql::extension! {
     funcs: [
-        vsql::func!(rot13_impl, "rot13", [vsql::Type::String] -> vsql::Type::String),
+        villagesql::func!(rot13_impl, "rot13", [villagesql::Type::String] -> villagesql::Type::String),
     ]
 }

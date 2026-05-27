@@ -1,6 +1,6 @@
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
-use vsql::{InValue, VdfReturn};
+use villagesql::{InValue, VdfReturn};
 
 // ── Binary layout ─────────────────────────────────────────────────────────────
 //
@@ -213,32 +213,32 @@ fn rational_to_real_impl(args: &[InValue]) -> VdfReturn {
 
 // ── Extension registration ────────────────────────────────────────────────────
 
-vsql::extension! {
+villagesql::extension! {
     funcs: [
-        vsql::func!(rational_add_impl, "rational_add",
-            [vsql::custom!("rational"), vsql::custom!("rational")] -> vsql::custom!("rational"),
+        villagesql::func!(rational_add_impl, "rational_add",
+            [villagesql::custom!("rational"), villagesql::custom!("rational")] -> villagesql::custom!("rational"),
             deterministic: true),
-        vsql::func!(rational_sub_impl, "rational_sub",
-            [vsql::custom!("rational"), vsql::custom!("rational")] -> vsql::custom!("rational"),
+        villagesql::func!(rational_sub_impl, "rational_sub",
+            [villagesql::custom!("rational"), villagesql::custom!("rational")] -> villagesql::custom!("rational"),
             deterministic: true),
-        vsql::func!(rational_mul_impl, "rational_mul",
-            [vsql::custom!("rational"), vsql::custom!("rational")] -> vsql::custom!("rational"),
+        villagesql::func!(rational_mul_impl, "rational_mul",
+            [villagesql::custom!("rational"), villagesql::custom!("rational")] -> villagesql::custom!("rational"),
             deterministic: true),
-        vsql::func!(rational_div_impl, "rational_div",
-            [vsql::custom!("rational"), vsql::custom!("rational")] -> vsql::custom!("rational"),
+        villagesql::func!(rational_div_impl, "rational_div",
+            [villagesql::custom!("rational"), villagesql::custom!("rational")] -> villagesql::custom!("rational"),
             deterministic: true),
-        vsql::func!(rational_numer_impl, "rational_numer",
-            [vsql::custom!("rational")] -> vsql::Type::Int,
+        villagesql::func!(rational_numer_impl, "rational_numer",
+            [villagesql::custom!("rational")] -> villagesql::Type::Int,
             deterministic: true),
-        vsql::func!(rational_denom_impl, "rational_denom",
-            [vsql::custom!("rational")] -> vsql::Type::Int,
+        villagesql::func!(rational_denom_impl, "rational_denom",
+            [villagesql::custom!("rational")] -> villagesql::Type::Int,
             deterministic: true),
-        vsql::func!(rational_to_real_impl, "rational_to_real",
-            [vsql::custom!("rational")] -> vsql::Type::Real,
+        villagesql::func!(rational_to_real_impl, "rational_to_real",
+            [villagesql::custom!("rational")] -> villagesql::Type::Real,
             deterministic: true),
     ],
     types: [
-        vsql::custom_type!(
+        villagesql::custom_type!(
             type_name: "rational",
             persisted_length: 16,
             max_decode_buffer_length: 42,

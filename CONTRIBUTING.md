@@ -5,7 +5,7 @@
 | Path | Purpose |
 |------|---------|
 | `vsql-sys/` | Raw FFI bindings (`bindings.rs` + generated entry points) |
-| `vsql/` | Safe Rust wrapper — this is what extension authors use |
+| `vsql/` | `villagesql` crate — safe Rust wrapper for extension authors |
 | `cargo-vsql/` | The `cargo vsql` subcommand |
 | `examples/` | Reference extensions |
 | `tests/` | SDK integration tests |
@@ -59,7 +59,7 @@ The `check-bindings` CI job regenerates `bindings.rs` and runs `git diff --exit-
 
 ## Release checklist
 
-- [ ] Update version in `vsql-sys/Cargo.toml`, `vsql/Cargo.toml`, and `cargo-vsql/Cargo.toml`
+- [ ] Update version in `vsql-sys/Cargo.toml` (`villagesql-sys`), `vsql/Cargo.toml` (`villagesql`), and `cargo-vsql/Cargo.toml`
 - [ ] Regenerate bindings if headers changed (see above)
 - [ ] `cargo test` passes
 - [ ] CI is green
