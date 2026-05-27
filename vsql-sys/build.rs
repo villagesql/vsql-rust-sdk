@@ -1,13 +1,18 @@
-use std::path::PathBuf;
-
 fn main() {
+    println!("cargo:rerun-if-changed=../include/villagesql/abi/types.h");
+    println!("cargo:rerun-if-changed=../include/villagesql/abi/preview/storage.h");
+
+    #[cfg(feature = "regenerate-bindings")]
+    regenerate();
+}
+
+#[cfg(feature = "regenerate-bindings")]
+fn regenerate() {
+    use std::path::PathBuf;
+
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let include_dir = manifest_dir.parent().unwrap().join("include");
     let types_h = include_dir.join("villagesql/abi/types.h");
-    let storage_h = include_dir.join("villagesql/abi/preview/storage.h");
-
-    println!("cargo:rerun-if-changed={}", types_h.display());
-    println!("cargo:rerun-if-changed={}", storage_h.display());
 
     let bindings = bindgen::Builder::default()
         .header(types_h.to_str().unwrap())
@@ -25,8 +30,7 @@ fn main() {
         .generate()
         .expect("Unable to generate bindings");
 
-    let out_path = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     bindings
-        .write_to_file(out_path.join("bindings.rs"))
+        .write_to_file(manifest_dir.join("src/bindings.rs"))
         .expect("Couldn't write bindings");
 }
