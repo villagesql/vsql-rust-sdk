@@ -4,15 +4,17 @@ Write custom SQL functions (VDFs) for VillageSQL in safe Rust. The SDK handles a
 
 ## Prerequisites
 
-- Rust toolchain (stable)
+- [Rust toolchain](https://rustup.rs) (stable)
 - `cargo-vsql` installed (see [Installing cargo-vsql](#installing-cargo-vsql))
 - VillageSQL build directory (for `install` and `test` commands)
 
 ## Installing cargo-vsql
 
-From the root of this repository:
+Clone the repository and install the CLI tool:
 
 ```sh
+git clone https://github.com/villagesql/vsql-rust-sdk.git
+cd vsql-rust-sdk
 cargo install --path cargo-vsql
 ```
 
@@ -30,6 +32,10 @@ cd my-extension
 Set the crate type in `Cargo.toml`:
 
 ```toml
+[workspace]
+members = ["."]
+resolver = "2"
+
 [package]
 name = "my-extension"
 version = "0.1.0"
@@ -39,7 +45,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-vsql = { path = "/path/to/vsql-rust-sdk/vsql" }
+vsql = { path = "/path/to/vsql-rust-sdk/vsql" }  # replace with your clone path
 ```
 
 ### 2. Write your function
@@ -109,6 +115,7 @@ examples/vsql_rot13/
 To build and run its tests:
 
 ```sh
+export VillageSQL_BUILD_DIR=/path/to/villagesql/build
 cd examples/vsql_rot13
 cargo vsql test
 ```
@@ -270,12 +277,14 @@ manifest.json
 lib/<name>.so
 ```
 
+`cargo vsql install` copies the VEB into `$VillageSQL_BUILD_DIR/veb_output_directory`, which is where the MTR test server reads from. If you're running a standalone installed server, copy the VEB from `dist/` to that server's configured `veb_dir` instead.
+
 VillageSQL installs and loads this archive with:
 
 ```sql
-INSTALL EXTENSION 'vsql_rot13';
+INSTALL EXTENSION vsql_rot13;
 -- use the function --
-UNINSTALL EXTENSION 'vsql_rot13';
+UNINSTALL EXTENSION vsql_rot13;
 ```
 
 ## Writing tests
