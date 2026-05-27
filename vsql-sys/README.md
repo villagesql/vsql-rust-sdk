@@ -1,4 +1,4 @@
-# vsql-sys
+# villagesql-sys
 
 Raw FFI bindings for the VillageSQL extension ABI.
 
