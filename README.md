@@ -12,7 +12,7 @@ Write custom SQL functions (VDFs) for VillageSQL in safe Rust. The SDK handles a
 
 ## Prerequisites
 
-- [Rust toolchain](https://rustup.rs) (stable)
+- [Rust toolchain](https://rustup.rs) (stable, 1.87+)
 - `cargo-vsql` installed (see [cargo-vsql README](cargo-vsql/README.md))
 - VillageSQL build directory (for `install` and `test` commands)
 
@@ -80,6 +80,8 @@ Create `manifest.json` next to `Cargo.toml`:
 ```
 
 ### 5. Package, install, and test
+
+Run `cargo vsql` commands from inside your extension directory (not the workspace root).
 
 ```sh
 export VillageSQL_BUILD_DIR=/path/to/villagesql/build
