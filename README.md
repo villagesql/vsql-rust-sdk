@@ -26,6 +26,16 @@ cargo install cargo-vsql
 
 ### 2. Create a new extension crate
 
+The fastest way is the [`vsql-extension-template-rust`](https://github.com/villagesql/vsql-extension-template-rust) template — it scaffolds the `Cargo.toml`, `manifest.json`, source layout, and a CI workflow for you:
+
+```sh
+cargo install cargo-generate
+cargo generate --git https://github.com/villagesql/vsql-extension-template-rust
+```
+
+<details>
+<summary>Or set it up by hand</summary>
+
 ```sh
 cargo new --lib my-extension
 cd my-extension
@@ -44,6 +54,8 @@ crate-type = ["cdylib"]
 [dependencies]
 villagesql = "0.0.1"
 ```
+
+</details>
 
 ### 3. Write your function
 
@@ -90,6 +102,10 @@ cargo vsql test
 ```
 
 For the full API reference see the [villagesql README](villagesql/README.md). For all `cargo vsql` commands see the [cargo-vsql README](cargo-vsql/README.md).
+
+## Continuous integration
+
+Reusable GitHub Actions workflows for building, testing, and packaging Rust VillageSQL extensions live in [`villagesql/extension-actions`](https://github.com/villagesql/extension-actions). The [`vsql-extension-template-rust`](https://github.com/villagesql/vsql-extension-template-rust) template wires them up by default.
 
 ## Examples
 

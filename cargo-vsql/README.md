@@ -8,6 +8,8 @@ Cargo subcommand for building, packaging, and testing VillageSQL extensions.
 cargo install cargo-vsql
 ```
 
+To scaffold a new extension that is preconfigured to use this CLI, use the [`vsql-extension-template-rust`](https://github.com/villagesql/vsql-extension-template-rust) cargo-generate template. For CI, reusable GitHub Actions workflows are available at [`villagesql/extension-actions`](https://github.com/villagesql/extension-actions).
+
 ## Commands
 
 Run all commands from inside your extension directory (not the workspace root).
