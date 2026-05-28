@@ -25,7 +25,7 @@ struct Args {
 enum Cmd {
     /// Build and package the extension in the current directory as a .veb archive
     Package,
-    /// Package and install to $VillageSQL_BUILD_DIR/veb_output_directory
+    /// Package and install to `$VillageSQL_BUILD_DIR/veb_output_directory`
     Install,
     /// Install and run the mysql-test suite
     Test {
@@ -92,6 +92,7 @@ fn extension_name(dir: &Path) -> Result<String> {
 
 fn workspace_root(start: &Path) -> Result<PathBuf> {
     let mut dir = start.to_path_buf();
+    let mut last_cargo_dir: Option<PathBuf> = None;
     loop {
         let cargo_toml = dir.join("Cargo.toml");
         if cargo_toml.exists() {
@@ -100,10 +101,14 @@ fn workspace_root(start: &Path) -> Result<PathBuf> {
             if parsed.get("workspace").is_some() {
                 return Ok(dir);
             }
+            last_cargo_dir = Some(dir.clone());
         }
         if !dir.pop() {
+            if let Some(implicit_root) = last_cargo_dir {
+                return Ok(implicit_root);
+            }
             bail!(
-                "could not find workspace root (no Cargo.toml with [workspace] above {})",
+                "could not find workspace root (no Cargo.toml above {})",
                 start.display()
             );
         }
@@ -165,10 +170,20 @@ fn package(name: &str, ext_dir: &Path, workspace_root: &Path) -> Result<PathBuf>
     Ok(veb_path)
 }
 
+fn build_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("VillageSQL_BUILD_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    let home = std::env::var("HOME").context("HOME is not set")?;
+    let prebuilt = PathBuf::from(&home).join(".villagesql").join("prebuilt");
+    if prebuilt.exists() {
+        return Ok(prebuilt);
+    }
+    Ok(PathBuf::from(&home).join(".villagesql"))
+}
+
 fn install(name: &str, veb: &Path) -> Result<()> {
-    let build_dir =
-        std::env::var("VillageSQL_BUILD_DIR").context("VillageSQL_BUILD_DIR is not set")?;
-    let install_dir = PathBuf::from(build_dir).join("veb_output_directory");
+    let install_dir = build_dir()?.join("veb_output_directory");
     std::fs::create_dir_all(&install_dir)?;
     let dest = install_dir.join(format!("{name}.veb"));
     std::fs::copy(veb, &dest)?;
@@ -177,12 +192,7 @@ fn install(name: &str, veb: &Path) -> Result<()> {
 }
 
 fn run_tests(ext_dir: &Path, record: bool) -> Result<()> {
-    let build_dir =
-        std::env::var("VillageSQL_BUILD_DIR").context("VillageSQL_BUILD_DIR is not set")?;
-
-    let mtr = PathBuf::from(&build_dir)
-        .join("mysql-test")
-        .join("mysql-test-run.pl");
+    let mtr = build_dir()?.join("mysql-test").join("mysql-test-run.pl");
     if !mtr.exists() {
         bail!("MTR not found at {}", mtr.display());
     }

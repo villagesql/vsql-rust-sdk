@@ -1,6 +1,6 @@
 [package]
 name = "cargo-vsql"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Cargo subcommand for building, packaging, and testing VillageSQL extensions"
 license = "GPL-2.0-only"
