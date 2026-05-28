@@ -8,6 +8,16 @@ The SDK handles all FFI marshaling so you work entirely in ordinary Rust types. 
 
 ### 1. Create a new crate
 
+The fastest way is the [`vsql-extension-template-rust`](https://github.com/villagesql/vsql-extension-template-rust) cargo-generate template, which scaffolds `Cargo.toml`, `manifest.json`, source layout, and a CI workflow wired up to [`villagesql/extension-actions`](https://github.com/villagesql/extension-actions):
+
+```sh
+cargo install cargo-generate
+cargo generate --git https://github.com/villagesql/vsql-extension-template-rust
+```
+
+<details>
+<summary>Or set it up by hand</summary>
+
 ```sh
 cargo new --lib my-extension
 cd my-extension
@@ -31,6 +41,8 @@ crate-type = ["cdylib"]
 [dependencies]
 villagesql = "0.0.1"
 ```
+
+</details>
 
 ### 2. Write your function
 
