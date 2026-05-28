@@ -10,6 +10,8 @@ cargo install cargo-vsql
 
 ## Commands
 
+Run all commands from inside your extension directory (not the workspace root).
+
 ### `cargo vsql package`
 
 Compiles the extension in release mode and produces `dist/<name>.veb` — a tar archive containing:
