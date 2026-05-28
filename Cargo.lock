@@ -95,7 +95,7 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "cargo-vsql"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -524,7 +524,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "villagesql"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "paste",
  "villagesql-sys",
@@ -532,14 +532,14 @@ dependencies = [
 
 [[package]]
 name = "villagesql-sys"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bindgen",
 ]
 
 [[package]]
 name = "vsql_rational"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "villagesql",
 ]

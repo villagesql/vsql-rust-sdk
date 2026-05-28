@@ -1,6 +1,6 @@
 [package]
 name = "villagesql"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "Safe Rust SDK for building VillageSQL extension functions (VDFs)"
 license = "GPL-2.0-only"
@@ -11,5 +11,5 @@ keywords = ["sql", "database", "extension", "ffi", "villagesql"]
 categories = ["database", "api-bindings"]
 
 [dependencies]
-villagesql-sys = { path = "../vsql-sys", version = "0.1" }
+villagesql-sys = { path = "../villagesql-sys", version = "0.0.1" }
 paste = "1"
