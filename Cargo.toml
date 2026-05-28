@@ -10,6 +10,7 @@ members = [
 default-members = [
     "villagesql-sys",
     "villagesql",
+    "cargo-vsql",
     "examples/vsql_rot13",
     "examples/vsql_rational",
     "tests/sdk_coverage",

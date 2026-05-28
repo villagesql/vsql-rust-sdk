@@ -44,10 +44,6 @@ cd my-extension
 Add to `Cargo.toml`:
 
 ```toml
-[workspace]
-members = ["."]
-resolver = "2"
-
 [lib]
 crate-type = ["cdylib"]
 
