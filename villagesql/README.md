@@ -70,6 +70,8 @@ Create `manifest.json` next to `Cargo.toml`:
 
 ### 4. Package, install, and test
 
+Run these commands from inside your extension directory (not the workspace root).
+
 ```sh
 # Build and create dist/my-extension.veb
 cargo vsql package
