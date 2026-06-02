@@ -2,7 +2,7 @@
 //!
 //! # Quick start (functions)
 //!
-//! 1. Add `villagesql = "0.1"` to your `Cargo.toml` with `crate-type = ["cdylib"]`.
+//! 1. Add `villagesql = "0.0.1"` to your `Cargo.toml` with `crate-type = ["cdylib"]`.
 //! 2. Write a function with the signature `fn(&[InValue]) -> VdfReturn`.
 //! 3. Declare the extension with the [`extension!`] macro.
 //!
