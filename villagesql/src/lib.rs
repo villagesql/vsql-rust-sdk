@@ -12,7 +12,6 @@
 pub use paste;
 pub use villagesql_sys as sys;
 
-use std::cell::RefCell;
 use std::ffi::c_char;
 use villagesql_sys::{
     vef_func_desc_t, vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t,
@@ -250,22 +249,15 @@ unsafe fn write_result(ret: VdfReturn, result: &mut vef_vdf_result_t) {
         VdfReturn::String(s) => {
             let bytes = s.as_bytes();
             let anon = &result.__bindgen_anon_1.__bindgen_anon_1;
-            let (str_buf, max, alt) = (anon.str_buf, anon.max_str_len, anon.alt_str_buf);
+            let (str_buf, max) = (anon.str_buf, anon.max_str_len);
             if bytes.len() <= max {
                 // Fits the server-provided buffer (sized via func!'s buffer_size).
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), str_buf.cast::<u8>(), bytes.len());
                 result.actual_len = bytes.len();
                 result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
-            } else if !alt.is_null() {
-                // Caller offered an alt-buffer slot (custom-type encode/decode
-                // path): hand it a pointer into our own buffer. See `alt_buf_ptr`.
-                *alt = alt_buf_ptr(bytes).cast::<c_char>();
-                result.actual_len = bytes.len();
-                result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
             } else {
-                // No room and no alt slot (normal scalar VDF path). Error rather
-                // than truncate — the function should declare a larger
-                // buffer_size in func!.
+                // Too large for the result buffer. Error rather than truncate —
+                // the function should declare a larger buffer_size in func!.
                 let msg = format!(
                     "result of {} bytes exceeds the {max}-byte buffer; \
                      declare a larger buffer_size in func!",
@@ -285,22 +277,15 @@ unsafe fn write_result(ret: VdfReturn, result: &mut vef_vdf_result_t) {
         }
         VdfReturn::Binary(bytes) => {
             let anon = &result.__bindgen_anon_1.__bindgen_anon_2;
-            let (bin_buf, max, alt) = (anon.bin_buf, anon.max_bin_len, anon.alt_bin_buf);
+            let (bin_buf, max) = (anon.bin_buf, anon.max_bin_len);
             if bytes.len() <= max {
                 // Fits the server-provided buffer (sized via func!'s buffer_size).
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), bin_buf, bytes.len());
                 result.actual_len = bytes.len();
                 result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
-            } else if !alt.is_null() {
-                // Caller offered an alt-buffer slot (custom-type encode/decode
-                // path): hand it a pointer into our own buffer. See `alt_buf_ptr`.
-                *alt = alt_buf_ptr(&bytes);
-                result.actual_len = bytes.len();
-                result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
             } else {
-                // No room and no alt slot (normal scalar VDF path). Error rather
-                // than truncate — the function should declare a larger
-                // buffer_size in func!.
+                // Too large for the result buffer. Error rather than truncate —
+                // the function should declare a larger buffer_size in func!.
                 let msg = format!(
                     "result of {} bytes exceeds the {max}-byte buffer; \
                      declare a larger buffer_size in func!",
