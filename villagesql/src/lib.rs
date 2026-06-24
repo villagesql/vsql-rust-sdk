@@ -321,28 +321,6 @@ unsafe fn write_result(ret: VdfReturn, result: &mut vef_vdf_result_t) {
     }
 }
 
-thread_local! {
-    /// SDK-owned overflow buffer for results that don't fit the caller's
-    /// preallocated buffer. Reused across VDF calls on the same thread.
-    static ALT_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Copy `bytes` into the thread-local overflow buffer and return a pointer to
-/// it, for handing to the server via `alt_str_buf` / `alt_bin_buf`.
-///
-/// The ABI requires the pointer to stay valid until the next VDF call (or the
-/// postrun hook). The thread-local satisfies this: the server reads the result
-/// before issuing the next call, which is the only thing that overwrites the
-/// buffer. The SDK retains ownership; the memory is reclaimed at thread exit.
-fn alt_buf_ptr(bytes: &[u8]) -> *mut u8 {
-    ALT_BUF.with(|b| {
-        let mut b = b.borrow_mut();
-        b.clear();
-        b.extend_from_slice(bytes);
-        b.as_mut_ptr()
-    })
-}
-
 unsafe fn write_error_msg(msg: &[u8], buf: *mut c_char) {
     let max = (VEF_MAX_ERROR_LEN as usize).saturating_sub(1);
     let n = msg.len().min(max);
