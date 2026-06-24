@@ -12,6 +12,7 @@
 pub use paste;
 pub use villagesql_sys as sys;
 
+use std::cell::RefCell;
 use std::ffi::c_char;
 use villagesql_sys::{
     vef_func_desc_t, vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t,
@@ -152,6 +153,7 @@ pub struct FuncDescriptor {
         *mut vef_vdf_args_t,
         *mut vef_vdf_result_t,
     ),
+    pub buffer_size: usize,
     pub deterministic: bool,
 }
 
@@ -246,12 +248,32 @@ unsafe fn write_result(ret: VdfReturn, result: &mut vef_vdf_result_t) {
             result.type_ = vef_return_value_type_t_VEF_RESULT_NULL;
         }
         VdfReturn::String(s) => {
-            result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
-            let anon = &mut result.__bindgen_anon_1.__bindgen_anon_1;
             let bytes = s.as_bytes();
-            let n = bytes.len().min(anon.max_str_len);
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), anon.str_buf.cast::<u8>(), n);
-            result.actual_len = n;
+            let anon = &result.__bindgen_anon_1.__bindgen_anon_1;
+            let (str_buf, max, alt) = (anon.str_buf, anon.max_str_len, anon.alt_str_buf);
+            if bytes.len() <= max {
+                // Fits the server-provided buffer (sized via func!'s buffer_size).
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), str_buf.cast::<u8>(), bytes.len());
+                result.actual_len = bytes.len();
+                result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
+            } else if !alt.is_null() {
+                // Caller offered an alt-buffer slot (custom-type encode/decode
+                // path): hand it a pointer into our own buffer. See `alt_buf_ptr`.
+                *alt = alt_buf_ptr(bytes).cast::<c_char>();
+                result.actual_len = bytes.len();
+                result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
+            } else {
+                // No room and no alt slot (normal scalar VDF path). Error rather
+                // than truncate — the function should declare a larger
+                // buffer_size in func!.
+                let msg = format!(
+                    "result of {} bytes exceeds the {max}-byte buffer; \
+                     declare a larger buffer_size in func!",
+                    bytes.len()
+                );
+                result.type_ = vef_return_value_type_t_VEF_RESULT_ERROR;
+                write_error_msg(msg.as_bytes(), result.error_msg);
+            }
         }
         VdfReturn::Real(v) => {
             result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
@@ -262,11 +284,31 @@ unsafe fn write_result(ret: VdfReturn, result: &mut vef_vdf_result_t) {
             result.__bindgen_anon_1.int_value = v;
         }
         VdfReturn::Binary(bytes) => {
-            result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
-            let anon = &mut result.__bindgen_anon_1.__bindgen_anon_2;
-            let n = bytes.len().min(anon.max_bin_len);
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), anon.bin_buf, n);
-            result.actual_len = n;
+            let anon = &result.__bindgen_anon_1.__bindgen_anon_2;
+            let (bin_buf, max, alt) = (anon.bin_buf, anon.max_bin_len, anon.alt_bin_buf);
+            if bytes.len() <= max {
+                // Fits the server-provided buffer (sized via func!'s buffer_size).
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), bin_buf, bytes.len());
+                result.actual_len = bytes.len();
+                result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
+            } else if !alt.is_null() {
+                // Caller offered an alt-buffer slot (custom-type encode/decode
+                // path): hand it a pointer into our own buffer. See `alt_buf_ptr`.
+                *alt = alt_buf_ptr(&bytes);
+                result.actual_len = bytes.len();
+                result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
+            } else {
+                // No room and no alt slot (normal scalar VDF path). Error rather
+                // than truncate — the function should declare a larger
+                // buffer_size in func!.
+                let msg = format!(
+                    "result of {} bytes exceeds the {max}-byte buffer; \
+                     declare a larger buffer_size in func!",
+                    bytes.len()
+                );
+                result.type_ = vef_return_value_type_t_VEF_RESULT_ERROR;
+                write_error_msg(msg.as_bytes(), result.error_msg);
+            }
         }
         VdfReturn::Warning(msg) => {
             result.type_ = vef_return_value_type_t_VEF_RESULT_WARNING;
@@ -277,6 +319,28 @@ unsafe fn write_result(ret: VdfReturn, result: &mut vef_vdf_result_t) {
             write_error_msg(msg.as_bytes(), result.error_msg);
         }
     }
+}
+
+thread_local! {
+    /// SDK-owned overflow buffer for results that don't fit the caller's
+    /// preallocated buffer. Reused across VDF calls on the same thread.
+    static ALT_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Copy `bytes` into the thread-local overflow buffer and return a pointer to
+/// it, for handing to the server via `alt_str_buf` / `alt_bin_buf`.
+///
+/// The ABI requires the pointer to stay valid until the next VDF call (or the
+/// postrun hook). The thread-local satisfies this: the server reads the result
+/// before issuing the next call, which is the only thing that overwrites the
+/// buffer. The SDK retains ownership; the memory is reclaimed at thread exit.
+fn alt_buf_ptr(bytes: &[u8]) -> *mut u8 {
+    ALT_BUF.with(|b| {
+        let mut b = b.borrow_mut();
+        b.clear();
+        b.extend_from_slice(bytes);
+        b.as_mut_ptr()
+    })
 }
 
 unsafe fn write_error_msg(msg: &[u8], buf: *mut c_char) {
@@ -302,7 +366,7 @@ unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
         vdf: Some(d.trampoline),
         prerun: None,
         postrun: None,
-        buffer_size: 0,
+        buffer_size: d.buffer_size,
         deterministic: d.deterministic,
         clear: None,
         accumulate: None,
@@ -500,8 +564,11 @@ macro_rules! extension {
 /// ```
 #[macro_export]
 macro_rules! func {
+    // Full form: declare the result-buffer size and determinism. `buffer_size`
+    // is a plain value (ideally computed from data, not a magic literal); 0
+    // uses the server default (256 bytes).
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     deterministic: $det:expr) => {{
+     buffer_size: $bs:expr, deterministic: $det:expr) => {{
         $crate::paste::paste! {
             unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
                 _ctx: *mut $crate::sys::vef_context_t,
@@ -517,12 +584,26 @@ macro_rules! func {
                 params: [< __VSQL_PARAMS_ $impl_fn:upper >],
                 returns: $ret,
                 trampoline: [< __vsql_trampoline_ $impl_fn >],
+                buffer_size: $bs,
                 deterministic: $det,
             }
         }
     }};
+    // buffer_size only (determinism defaults to false).
+    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
+     buffer_size: $bs:expr) => {
+        $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
+            buffer_size: $bs, deterministic: false)
+    };
+    // deterministic only (buffer_size defaults to 0 = server default).
+    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
+     deterministic: $det:expr) => {
+        $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
+            buffer_size: 0, deterministic: $det)
+    };
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr) => {
-        $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret, deterministic: false)
+        $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
+            buffer_size: 0, deterministic: false)
     };
 }
 
@@ -693,6 +774,7 @@ macro_rules! custom_type {
                 params: [< __VSQL_FROM_STRING_PARAMS_ $enc_fn:upper >],
                 returns: $crate::custom!($type_name),
                 trampoline: [< __vsql_trampoline_from_string_ $enc_fn >],
+                buffer_size: 0,
                 deterministic: true,
             });
             __embedded.push($crate::FuncDescriptor {
@@ -701,6 +783,7 @@ macro_rules! custom_type {
                 params: [< __VSQL_TO_STRING_PARAMS_ $dec_fn:upper >],
                 returns: $crate::Type::String,
                 trampoline: [< __vsql_trampoline_to_string_ $dec_fn >],
+                buffer_size: 0,
                 deterministic: true,
             });
             __embedded.push($crate::FuncDescriptor {
@@ -709,6 +792,7 @@ macro_rules! custom_type {
                 params: [< __VSQL_COMPARE_PARAMS_ $cmp_fn:upper >],
                 returns: $crate::Type::Int,
                 trampoline: [< __vsql_trampoline_compare_ $cmp_fn >],
+                buffer_size: 0,
                 deterministic: true,
             });
             $(
@@ -718,6 +802,7 @@ macro_rules! custom_type {
                     params: [< __VSQL_HASH_PARAMS_ $hash_fn:upper >],
                     returns: $crate::Type::Int,
                     trampoline: [< __vsql_trampoline_hash_ $hash_fn >],
+                    buffer_size: 0,
                     deterministic: true,
                 });
             )?
