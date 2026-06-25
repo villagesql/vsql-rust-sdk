@@ -14,9 +14,19 @@
  * along with this program; if not, see <https://www.gnu.org/licenses/>.
  */
 
+// =============================================================================
+// VEF ABI HEADER — DO NOT WRITE CODE AGAINST THIS DIRECTLY
+// =============================================================================
+// This file defines the binary interface between the server and extension
+// .so files. Extension authors should use the C++ API in
+// <villagesql/vsql.h>, not these raw types. See villagesql/abi/README.md
+// for details.
+// =============================================================================
+
 #ifndef VILLAGESQL_ABI_TYPES_H_
 #define VILLAGESQL_ABI_TYPES_H_
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -221,12 +231,10 @@ typedef enum : int {
   VEF_TYPE_REAL = 1,
   VEF_TYPE_INT = 2,
   VEF_TYPE_CUSTOM = 3
-
-  // TODO(villagesql-ga): Do we want to support DECIMAL?
 } vef_type_id;
 
 // Snapshot of vef_invalue_t as of VEF_PROTOCOL_1. Used as the element type of
-// vef_vdf_args_t.values_v1 to preserve the correct stride when a v2 extension
+// vef_vdf_args_t.values_v1 to preserve the correct stride when a v3+ extension
 // is called by a v1 server. Do NOT add fields here.
 typedef struct {
   vef_type_id type;
@@ -304,10 +312,8 @@ typedef struct {
       size_t bin_len;
       const unsigned char *bin_value;
 
-      // protocol >= VEF_PROTOCOL_2
+      // protocol >= VEF_PROTOCOL_3
       // Read-only: the extension must not overwrite these parameters.
-      // TODO(villagesql-beta): Optimize this to pass a token so that the
-      // extension can cache these values in a language-specific way.
       vef_type_params_t type_params;
     };
 
@@ -392,7 +398,7 @@ typedef struct {
       // as alt_str_buf above.
       unsigned char **alt_bin_buf;
 
-      // protocol >= VEF_PROTOCOL_2
+      // protocol >= VEF_PROTOCOL_3
       // Read-only: the extension must not overwrite these parameters.
       vef_type_params_t type_params;
     };
@@ -404,7 +410,7 @@ typedef struct {
     long long int_value;
   };
 
-  // protocol >= VEF_PROTOCOL_2
+  // protocol >= VEF_PROTOCOL_3
   //
   // Optional out-channel for constant-string from_string inference at
   // fix_fields time. NULL on the normal row-time path. When non-NULL AND the
@@ -446,7 +452,7 @@ typedef struct {
     // protocol == VEF_PROTOCOL_1: flat array of value_count vef_invalue_v1_t.
     vef_invalue_v1_t *values_v1;
 
-    // protocol >= VEF_PROTOCOL_2: array of value_count pointers to
+    // protocol >= VEF_PROTOCOL_3: array of value_count pointers to
     // vef_invalue_t. Using a pointer array decouples extensions from
     // vef_invalue_t's binary layout, allowing the struct to grow in future
     // protocol versions.
@@ -462,6 +468,12 @@ typedef struct {
   // defined in this extension.
   const char *custom_type;
 } vef_type_t;
+
+// Sentinel value for vef_signature_t::param_count indicating that the function
+// accepts a variable number of arguments. When set, the framework skips
+// argument count and type validation and delegates to the prerun function
+// instead. `params` is NULL for varargs signatures.
+#define VEF_PARAM_VARARGS UINT_MAX
 
 typedef struct {
   unsigned int param_count;
@@ -593,7 +605,7 @@ typedef struct {
   // Minimum buffer size requested for string results (0 = use default)
   size_t buffer_size;
 
-  // protocol >= VEF_PROTOCOL_2
+  // protocol >= VEF_PROTOCOL_3
   // If true, the function always returns the same result for the same inputs
   // and has no side effects. The optimizer may use this to cache results.
   bool deterministic;
@@ -686,7 +698,7 @@ typedef struct {
   // OPTIONAL (NULL if not provided)
   vef_hash_func_t hash_func;
 
-  // protocol >= VEF_PROTOCOL_2
+  // protocol >= VEF_PROTOCOL_3
 
   // OPTIONAL: Names of VDFs (from this extension's funcs[]) to use as
   // encode/decode/compare/hash implementations. When set, the named VDF is
@@ -725,7 +737,7 @@ typedef struct {
   // The server runs the type's encode function on this string to produce the
   // binary default. Ignored if intrinsic_default_vdf_name is set. NULL means
   // no string default is provided; the server falls back to encode("").
-  // Only used when protocol >= VEF_PROTOCOL_2.
+  // Only used when protocol >= VEF_PROTOCOL_3.
   const char *intrinsic_default_str;
 
   // Upper bound on persisted_length across all valid parameterizations of
@@ -749,41 +761,44 @@ typedef struct {
 typedef struct vef_registration_t vef_registration_t;
 
 // A single capability request in vef_registration_t.required_capabilities.
-// The extension sets name, vtable_dest, abi_type_hash, and min_version. If the
-// capability is registered and passes all server-side checks, the server
-// writes the vtable pointer directly to *vtable_dest before vef_register
-// returns.
-//
-// Server-side compatibility logic (ABI hash check, min_version floor, and the
-// option to override both per capability) lives in cap_compat_fn in
-// capability_registry.h and is not visible to extension authors.
+// The extension sets name, vtable_dest, vtable_hash, and (if the capability
+// has a capability_config) capability_config_hash.  If the capability is
+// registered and the server has a matching (vtable_hash,
+// capability_config_hash) entry, the server writes the vtable pointer
+// directly to *vtable_dest before vef_register returns.
 typedef struct {
   // Capability name, e.g. "vsql::preview::ping". Must remain valid for the
   // lifetime of the extension (use a string literal).
   const char *name;
+
+  // Hashes appear first so a memory dump of this struct shows the ABI
+  // identity up front -- useful when diagnosing capability load failures
+  // from a core file.
+  //
+  // Version tag for the ABI struct type ("ver-1", "ver-2", ...).  The
+  // server's capability registry holds one or more (vtable, version)
+  // entries per capability name; the server picks the entry whose
+  // version matches this field, allowing a single capability to ship
+  // multiple ABI versions simultaneously.  Must point to a string
+  // literal (or otherwise static-lifetime storage).
+  const char *vtable_hash;
+
   // Address of the abi-pointer slot inside the extension's capability
   // wrapper. The server writes the vtable pointer here on success. Must
   // remain valid for the lifetime of the extension.
   void **vtable_dest;
-  // Compile-time hash of the ABI struct type, computed via
-  // villagesql::detail::abi_type_hash<AbiType>(). The server compares this
-  // against its own hash for the same name to detect ABI struct mismatches.
-  size_t abi_type_hash;
-  // Minimum capability ABI version the extension requires. The server reads
-  // the version field from its vtable and fails loading if it is less than
-  // this value. Set to the VEF_PREVIEW_*_ABI_VERSION constant the extension
-  // was compiled against.
-  uint32_t min_version;
-  // Optional. Capability-specific descriptor supplied by the extension to the
-  // server. Its type is capability-specific. NULL for capabilities that do not
-  // need it. Must remain valid for the lifetime of the extension.
-  const void *extension_data;
-  // Compile-time hash of the descriptor struct type pointed to by
-  // extension_data, computed via
-  // villagesql::detail::abi_type_hash<DescriptorType>(). 0 if extension_data
-  // is NULL. The server compares this against its own hash to detect
-  // descriptor ABI mismatches.
-  size_t descriptor_abi_hash;
+
+  // Version tag for the capability_config struct type pointed to by
+  // capability_config, same form as vtable_hash.  NULL when
+  // capability_config is NULL (capability has no config).  Same matching
+  // semantics as vtable_hash.
+  const char *capability_config_hash;
+  // Optional. Capability-specific configuration supplied by the extension
+  // to the server.  Its type is capability-specific (see
+  // capability_config_hash above) and is the C ABI struct that the matching
+  // server-side capability knows how to read.  NULL for capabilities that
+  // do not need it. Must remain valid for the lifetime of the extension.
+  const void *capability_config;
 } vef_required_capability_t;
 
 typedef struct vef_registration_t {
@@ -806,7 +821,7 @@ typedef struct vef_registration_t {
   unsigned int type_count;
   vef_type_desc_t **types;
 
-  // protocol >= VEF_PROTOCOL_2
+  // protocol >= VEF_PROTOCOL_3
   // Preview capabilities required by this extension. Each entry names a
   // capability the extension needs (e.g. "vsql::ping"). The server populates
   // the capability struct pointed to by each entry before vef_register()
