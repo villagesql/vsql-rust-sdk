@@ -141,7 +141,12 @@ fn find_lib(name: &str, workspace_root: &Path) -> Result<PathBuf> {
 
 // ── Subcommand implementations ────────────────────────────────────────────────
 // TODO(villagesql): handle building extension in debug mode.
-fn package(name: &str, ext_dir: &Path, workspace_root: &Path, config: &[String]) -> Result<PathBuf> {
+fn package(
+    name: &str,
+    ext_dir: &Path,
+    workspace_root: &Path,
+    config: &[String],
+) -> Result<PathBuf> {
     // Build the extension.
     println!("Building {name}...");
     let mut cmd = Command::new("cargo");
