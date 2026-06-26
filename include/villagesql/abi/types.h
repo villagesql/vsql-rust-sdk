@@ -26,7 +26,7 @@
 #ifndef VILLAGESQL_ABI_TYPES_H_
 #define VILLAGESQL_ABI_TYPES_H_
 
-#include <limits.h>
+// #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -473,7 +473,16 @@ typedef struct {
 // accepts a variable number of arguments. When set, the framework skips
 // argument count and type validation and delegates to the prerun function
 // instead. `params` is NULL for varargs signatures.
-#define VEF_PARAM_VARARGS UINT_MAX
+//
+// vsql-rust-sdk DIVERGENCE from the canonical server header: upstream defines
+// this as `UINT_MAX`. We spell it as a literal because rust-bindgen captures a
+// #define only when it can constant-fold the expansion, and <limits.h>'s
+// UINT_MAX is a plain literal under Apple libclang but a compound expression
+// under glibc — so the macro form makes the generated bindings non-reproducible
+// (the constant is emitted on macOS but dropped on Linux/CI). 0xFFFFFFFFu is
+// UINT_MAX for a 32-bit unsigned int. If you re-vendor types.h from the server,
+// you MUST re-apply this change, keeping the value equal to the server's UINT_MAX.
+#define VEF_PARAM_VARARGS 0xFFFFFFFFu
 
 typedef struct {
   unsigned int param_count;
