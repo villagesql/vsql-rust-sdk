@@ -17,6 +17,12 @@ enum Cargo {
 #[derive(clap::Args)]
 #[command(about = "VillageSQL extension tooling")]
 struct Args {
+    /// Forward a `--config KEY=VALUE` override to `cargo build` (repeatable).
+    /// Handy for patching deps during testing, e.g.
+    /// --config 'patch.crates-io.villagesql.path="/path/to/villagesql"'
+    #[arg(long, global = true, value_name = "KEY=VALUE")]
+    config: Vec<String>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -54,15 +60,15 @@ fn main() -> Result<()> {
 
     match args.cmd {
         Cmd::Package => {
-            let veb = package(&ext_name, &ext_dir, &workspace_root)?;
+            let veb = package(&ext_name, &ext_dir, &workspace_root, &args.config)?;
             println!("Created: {}", veb.display());
         }
         Cmd::Install => {
-            let veb = package(&ext_name, &ext_dir, &workspace_root)?;
+            let veb = package(&ext_name, &ext_dir, &workspace_root, &args.config)?;
             install(&ext_name, &veb)?;
         }
         Cmd::Test { record } => {
-            let veb = package(&ext_name, &ext_dir, &workspace_root)?;
+            let veb = package(&ext_name, &ext_dir, &workspace_root, &args.config)?;
             install(&ext_name, &veb)?;
             run_tests(&ext_dir, record)?;
         }
@@ -135,11 +141,21 @@ fn find_lib(name: &str, workspace_root: &Path) -> Result<PathBuf> {
 
 // ── Subcommand implementations ────────────────────────────────────────────────
 // TODO(villagesql): handle building extension in debug mode.
-fn package(name: &str, ext_dir: &Path, workspace_root: &Path) -> Result<PathBuf> {
+fn package(
+    name: &str,
+    ext_dir: &Path,
+    workspace_root: &Path,
+    config: &[String],
+) -> Result<PathBuf> {
     // Build the extension.
     println!("Building {name}...");
-    let status = Command::new("cargo")
-        .args(["build", "--release", "-p", name])
+    let mut cmd = Command::new("cargo");
+    cmd.args(["build", "--release", "-p", name]);
+    // Forward any `--config KEY=VALUE` overrides (e.g. patching deps to a local path).
+    for cfg in config {
+        cmd.args(["--config", cfg]);
+    }
+    let status = cmd
         .current_dir(workspace_root)
         .status()
         .context("running cargo build")?;
