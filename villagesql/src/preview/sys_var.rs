@@ -1,4 +1,4 @@
-//! ABI definitions for the 'vsql::sys_var' capability.
+//! ABI definitions for the '`vsql::sys_var`' capability.
 //!
 //! Based on the server header `villagesql/stable_sdk/v3/include/villagesql/
 //! abi/preview/sys_var.h`.
@@ -14,7 +14,7 @@ pub const VEF_PREVIEW_SYS_VAR_ABI_VERSION: u32 = 1;
 /// Capability name. NUL-terminated string for FFI.
 pub const VEF_PREVIEW_SYS_VAR_NAME: &[u8] = b"vsql::sys_var\0";
 
-/// Server-provided vtable for the sys_var capability
+/// Server-provided vtable for the `sys_var` capability
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct vef_preview_sys_var_t {
@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 // ABI version tag the server matches against
 const VTABLE_HASH: &[u8] = b"ver-1\0";
 
-/// capability_config version tag the server matches against.
+/// `capability_config` version tag the server matches against.
 const CONFIG_HASH: &[u8] = b"ver-1\0";
 
 /// `'static` slot the server populates with its `vef_preview_sys_var_t*` at load
@@ -80,6 +80,9 @@ pub struct SysVarCapability;
 impl SysVarCapability {
     /// Build the registration entry the server resolves at load time.
     /// Declares the extension's system variables as `specs`.
+    ///
+    /// # Panics
+    /// Panics if the number of declared variables exceeds `u32::MAX`.
     #[must_use]
     pub fn request(specs: &[SysVarSpec]) -> RequiredCapability {
         let mut desc_ptrs: Vec<*const vef_sys_var_desc_t> = Vec::with_capacity(specs.len());
@@ -163,9 +166,8 @@ impl SysVarCapability {
             }
         }
 
-        // Leak the array of pointers.
-        // Get its base pointer and count.
-        let var_count = desc_ptrs.len() as u32;
+        // Leak the array of pointers. Get its base pointer and count.
+        let var_count = u32::try_from(desc_ptrs.len()).expect("variable count exceeds u32");
         let vars_ptr = Box::into_raw(desc_ptrs.into_boxed_slice())
             .cast::<*const vef_sys_var_desc_t>()
             .cast_const();
@@ -196,7 +198,7 @@ impl SysVarCapability {
     /// Returns `None` if the capability is unavailable; otherwise `Some(false)`
     /// on success and `Some(true)` on error (the C convention is inverted).
     ///
-    /// # SAFETY:
+    /// # Safety
     /// `component_name`/`name` must be valid NUL-terminated C strings, and
     /// `val`/`val_len` valid writable pointers, all valid for the call.
     pub unsafe fn get(
@@ -209,14 +211,14 @@ impl SysVarCapability {
         if vtable.is_null() {
             return None;
         }
-        // SAFETY: non-null slot written by the server at load time, points to a
+        // Safety: non-null slot written by the server at load time, points to a
         // 'static vef_preview_sys_var_t the server owns.
         let vtable = unsafe { &*vtable };
         if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
             return None;
         }
         let get_fn = vtable.get?;
-        // SAFETY: server-provided function pointer; pointers valid for the call.
+        // Safety: server-provided function pointer; pointers valid for the call.
         Some(unsafe { get_fn(component_name, name, val, val_len) })
     }
 
@@ -243,7 +245,7 @@ impl SysVarCapability {
         if vtable.is_null() {
             return None;
         }
-        // SAFETY: non-null slot written by the server at load time, points to a
+        // Safety: non-null slot written by the server at load time, points to a
         // 'static vef_preview_sys_var_t the server owns.
         let vtable = unsafe { &*vtable };
         if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
@@ -426,5 +428,4 @@ const _: () = {
 };
 
 /// Callback the server calls after a system variable changes. Runs on the server's thread.
-
 pub type vef_sys_var_on_change_func_t = Option<unsafe extern "C" fn(*const vef_sys_var_change_t)>;

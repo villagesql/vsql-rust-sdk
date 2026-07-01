@@ -1,12 +1,12 @@
-//! Example VillageSQL extension exercising the `vsql::sys_var` capability.
+//! Example `VillageSQL` extension exercising the `vsql::sys_var` capability.
 //!
 //! Declares three system variables — one of each server-supported type — plus an
 //! `on_change` callback on the bool that counts how many times it has been set,
 //! exposed via `vsql_sys_var.change_count()`:
 //!
-//! * `enabled`   BOOL   (default true)   — has an on_change callback
+//! * `enabled`   BOOL   (default true)   — has an `on_change` callback
 //! * `threshold` INT    (default 1000, range 0..60000)
-//! * `log_path`  STRING (default "/tmp/vsql_sys_var.log")
+//! * `log_path`  STRING (default "`/tmp/vsql_sys_var.log`")
 //!
 //! ```sql
 //! SELECT @@global.vsql_sys_var.enabled;     -- 1
@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use villagesql::preview::sys_var::{vef_sys_var_change_t, SysVarCapability, SysVarSpec};
 use villagesql::{InValue, VdfReturn};
 
-/// Counts how many times `enabled` has changed. Bumped by the on_change callback.
+/// Counts how many times `enabled` has changed. Bumped by the `on_change` callback.
 static CHANGE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Called by the server after `enabled` is set. Runs on the server's thread, so
@@ -30,7 +30,9 @@ unsafe extern "C" fn on_enabled_change(_change: *const vef_sys_var_change_t) {
     CHANGE_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-/// SQL: vsql_sys_var.change_count() -> INT
+/// SQL: `vsql_sys_var.change_count()` -> INT
+// The change counter never approaches i64::MAX, so this cast cannot wrap.
+#[allow(clippy::cast_possible_wrap)]
 fn change_count_impl(_args: &[InValue]) -> VdfReturn {
     VdfReturn::int(CHANGE_COUNT.load(Ordering::Relaxed) as i64)
 }
