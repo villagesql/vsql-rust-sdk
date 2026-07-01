@@ -1,15 +1,19 @@
 //! Example VillageSQL extension exercising the `vsql::sys_var` capability.
 //!
-//! Declares one boolean system variable, `enabled` (default `true`), with an
-//! `on_change` callback that counts how many times it has been set. The count is
-//! exposed via `vsql_sys_var.change_count()`, so a test can prove the server
-//! actually called back into the extension:
+//! Declares three system variables — one of each server-supported type — plus an
+//! `on_change` callback on the bool that counts how many times it has been set,
+//! exposed via `vsql_sys_var.change_count()`:
+//!
+//! * `enabled`   BOOL   (default true)   — has an on_change callback
+//! * `threshold` INT    (default 1000, range 0..60000)
+//! * `log_path`  STRING (default "/tmp/vsql_sys_var.log")
 //!
 //! ```sql
-//! SELECT @@global.vsql_sys_var.enabled;   -- 1 (default)
-//! SELECT vsql_sys_var.change_count();     -- 0
+//! SELECT @@global.vsql_sys_var.enabled;     -- 1
 //! SET GLOBAL vsql_sys_var.enabled = 0;
-//! SELECT vsql_sys_var.change_count();     -- 1  (callback fired)
+//! SELECT vsql_sys_var.change_count();       -- 1  (callback fired)
+//! SELECT @@global.vsql_sys_var.threshold;   -- 1000
+//! SELECT @@global.vsql_sys_var.log_path;    -- /tmp/vsql_sys_var.log
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,6 +46,20 @@ villagesql::extension! {
                 comment: b"Enable the feature\0",
                 default: true,
                 on_change: Some(on_enabled_change),
+            },
+            SysVarSpec::Int {
+                name: b"threshold\0",
+                comment: b"Threshold in milliseconds\0",
+                default: 1000,
+                min: 0,
+                max: 60000,
+                on_change: None,
+            },
+            SysVarSpec::Str {
+                name: b"log_path\0",
+                comment: b"Path to the log file\0",
+                default: b"/tmp/vsql_sys_var.log\0",
+                on_change: None,
             },
         ]),
     ]

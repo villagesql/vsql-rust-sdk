@@ -1,14 +1,12 @@
 SET PERSIST vsql_allow_preview_extensions = ON;
 INSTALL EXTENSION vsql_sys_var;
-# The declared variable exists and shows its default value
+# BOOL: default is ON, and setting it fires the on_change callback
 SELECT @@global.vsql_sys_var.enabled;
 @@global.vsql_sys_var.enabled
 1
-# No changes have fired yet
 SELECT vsql_sys_var.change_count();
 vsql_sys_var.change_count()
 0
-# Setting the variable changes it AND fires the on_change callback
 SET GLOBAL vsql_sys_var.enabled = 0;
 SELECT @@global.vsql_sys_var.enabled;
 @@global.vsql_sys_var.enabled
@@ -16,13 +14,28 @@ SELECT @@global.vsql_sys_var.enabled;
 SELECT vsql_sys_var.change_count();
 vsql_sys_var.change_count()
 1
-# Setting it again fires the callback again
 SET GLOBAL vsql_sys_var.enabled = 1;
 SELECT vsql_sys_var.change_count();
 vsql_sys_var.change_count()
 2
+# INT: default is 1000, settable within its declared range
+SELECT @@global.vsql_sys_var.threshold;
+@@global.vsql_sys_var.threshold
+1000
+SET GLOBAL vsql_sys_var.threshold = 500;
+SELECT @@global.vsql_sys_var.threshold;
+@@global.vsql_sys_var.threshold
+500
+# STRING: default path, settable to a new value
+SELECT @@global.vsql_sys_var.log_path;
+@@global.vsql_sys_var.log_path
+/tmp/vsql_sys_var.log
+SET GLOBAL vsql_sys_var.log_path = '/var/log/custom.log';
+SELECT @@global.vsql_sys_var.log_path;
+@@global.vsql_sys_var.log_path
+/var/log/custom.log
 UNINSTALL EXTENSION vsql_sys_var;
-# After UNINSTALL the variable is no longer registered
+# After UNINSTALL the variables are no longer registered
 SELECT @@global.vsql_sys_var.enabled;
 ERROR HY000: Unknown system variable 'vsql_sys_var.enabled'
 SET PERSIST vsql_allow_preview_extensions = OFF;

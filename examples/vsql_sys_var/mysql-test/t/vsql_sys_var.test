@@ -1,32 +1,35 @@
 # Tests the vsql::sys_var capability for the vsql_sys_var example extension.
-# The extension declares one boolean system variable, `enabled` (default true),
-# with an on_change callback that increments a counter exposed via
-# vsql_sys_var.change_count(). This proves both directions of the capability:
-# declaring a variable (Flavor B config) and the server calling back into the
-# extension when the variable is set (Flavor B callback).
+# The extension declares one variable of each server-supported type (bool, int,
+# string) plus an on_change callback on the bool. This proves both directions of
+# the capability: declaring variables (Flavor B config) and the server calling
+# back into the extension when a variable is set (Flavor B callback).
 
 SET PERSIST vsql_allow_preview_extensions = ON;
 
 INSTALL EXTENSION vsql_sys_var;
 
---echo # The declared variable exists and shows its default value
+--echo # BOOL: default is ON, and setting it fires the on_change callback
 SELECT @@global.vsql_sys_var.enabled;
-
---echo # No changes have fired yet
 SELECT vsql_sys_var.change_count();
-
---echo # Setting the variable changes it AND fires the on_change callback
 SET GLOBAL vsql_sys_var.enabled = 0;
 SELECT @@global.vsql_sys_var.enabled;
 SELECT vsql_sys_var.change_count();
-
---echo # Setting it again fires the callback again
 SET GLOBAL vsql_sys_var.enabled = 1;
 SELECT vsql_sys_var.change_count();
 
+--echo # INT: default is 1000, settable within its declared range
+SELECT @@global.vsql_sys_var.threshold;
+SET GLOBAL vsql_sys_var.threshold = 500;
+SELECT @@global.vsql_sys_var.threshold;
+
+--echo # STRING: default path, settable to a new value
+SELECT @@global.vsql_sys_var.log_path;
+SET GLOBAL vsql_sys_var.log_path = '/var/log/custom.log';
+SELECT @@global.vsql_sys_var.log_path;
+
 UNINSTALL EXTENSION vsql_sys_var;
 
---echo # After UNINSTALL the variable is no longer registered
+--echo # After UNINSTALL the variables are no longer registered
 --error ER_UNKNOWN_SYSTEM_VARIABLE
 SELECT @@global.vsql_sys_var.enabled;
 

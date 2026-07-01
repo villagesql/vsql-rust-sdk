@@ -59,6 +59,20 @@ pub enum SysVarSpec {
         default: bool,
         on_change: vef_sys_var_on_change_func_t, // optional callback for when the value changes
     },
+    Int {
+        name: &'static [u8],
+        comment: &'static [u8],
+        default: i64,
+        min: i64,
+        max: i64,
+        on_change: vef_sys_var_on_change_func_t,
+    },
+    Str {
+        name: &'static [u8],
+        comment: &'static [u8],
+        default: &'static [u8], // NUL-terminated
+        on_change: vef_sys_var_on_change_func_t,
+    },
 }
 
 pub struct SysVarCapability;
@@ -91,8 +105,46 @@ impl SysVarCapability {
                     let desc_ptr: *const vef_sys_var_desc_t = Box::into_raw(Box::new(desc));
                     desc_ptrs.push(desc_ptr);
                 }
+                SysVarSpec::Int { name, comment, default, min, max, on_change } => {
+                    let value_ptr: *mut i64 = Box::into_raw(Box::new(*default));
+                    let desc = vef_sys_var_desc_t {
+                        name: name.as_ptr().cast::<c_char>(),
+                        comment: comment.as_ptr().cast::<c_char>(),
+                        type_: VEF_VAR_INT,
+                        on_change: *on_change,
+                        value: vef_sys_var_value_t {
+                            integer: vef_sys_var_int_t {
+                                value_ptr,
+                                def_val: *default,
+                                min_val: *min,
+                                max_val: *max,
+                            },
+                        },
+                    };
+                    let desc_ptr: *const vef_sys_var_desc_t = Box::into_raw(Box::new(desc));
+                    desc_ptrs.push(desc_ptr);
+                }
+                SysVarSpec::Str { name, comment, default, on_change } => {
+                    // Leak storage for the current value pointer
+                    let value_ptr: *mut *mut c_char = Box::into_raw(Box::new(std::ptr::null_mut::<c_char>()));
+                    let desc = vef_sys_var_desc_t {
+                        name: name.as_ptr().cast::<c_char>(),
+                        comment: comment.as_ptr().cast::<c_char>(),
+                        type_: VEF_VAR_STR,
+                        on_change: *on_change,
+                        value: vef_sys_var_value_t {
+                            str_: vef_sys_var_str_t {
+                                value_ptr,
+                                def_val: default.as_ptr().cast::<c_char>(),
+                            },
+                        },
+                    };
+                    let desc_ptr: *const vef_sys_var_desc_t = Box::into_raw(Box::new(desc));
+                    desc_ptrs.push(desc_ptr);
+                }
             }
         }
+        
         // Leak the array of pointers. 
         // Get its base pointer and count.
         let var_count = desc_ptrs.len() as u32;
