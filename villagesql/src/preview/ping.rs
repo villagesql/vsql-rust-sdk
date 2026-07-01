@@ -1,4 +1,4 @@
-//! ABI definitions for the 'vsql::preview::ping' capability.
+//! ABI definitions for the '`vsql::preview::ping`' capability.
 //!
 //! Based on the server header `villagesql/stable_sdk/v3/include/villagesql/
 //! abi/preview/ping.h`.

@@ -28,6 +28,7 @@ pub struct RequiredCapability {
 
 impl RequiredCapability {
     /// Converts to the FFI structure.
+    #[allow(clippy::wrong_self_convention)] // &self is correct here; we don't want to consume the struct
     pub(crate) fn to_raw(&self) -> vef_required_capability_t {
         vef_required_capability_t {
             name: self.name,
