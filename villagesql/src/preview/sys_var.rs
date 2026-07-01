@@ -4,7 +4,7 @@
 //! abi/preview/sys_var.h`.
 //! This is a preview capability. The ABI is version-gated via the 'version' field
 //! and may change in future versions.
-//! Keep this struct byte for byte compatible with the server implementation. 
+//! Keep this struct byte for byte compatible with the server implementation.
 
 #![allow(non_camel_case_types)]
 
@@ -39,7 +39,7 @@ use crate::preview::RequiredCapability;
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-// ABI version tag the server matches against 
+// ABI version tag the server matches against
 const VTABLE_HASH: &[u8] = b"ver-1\0";
 
 /// capability_config version tag the server matches against.
@@ -54,8 +54,8 @@ static SYS_VAR_VTABLE: AtomicPtr<vef_preview_sys_var_t> = AtomicPtr::new(std::pt
 /// One system variable an extension wants to declare.
 pub enum SysVarSpec {
     Bool {
-        name: &'static [u8],     // NUL-terminated, e.g. b"enabled\0"
-        comment: &'static [u8],  // NUL-terminated, e.g. b"Enable the feature\0"
+        name: &'static [u8],    // NUL-terminated, e.g. b"enabled\0"
+        comment: &'static [u8], // NUL-terminated, e.g. b"Enable the feature\0"
         default: bool,
         on_change: vef_sys_var_on_change_func_t, // optional callback for when the value changes
     },
@@ -85,7 +85,12 @@ impl SysVarCapability {
         let mut desc_ptrs: Vec<*const vef_sys_var_desc_t> = Vec::with_capacity(specs.len());
         for spec in specs {
             match spec {
-                SysVarSpec::Bool { name, comment, default, on_change } => {
+                SysVarSpec::Bool {
+                    name,
+                    comment,
+                    default,
+                    on_change,
+                } => {
                     // Leak storage for the current value pointer
                     let value_ptr: *mut bool = Box::into_raw(Box::new(*default));
                     let desc = vef_sys_var_desc_t {
@@ -105,7 +110,14 @@ impl SysVarCapability {
                     let desc_ptr: *const vef_sys_var_desc_t = Box::into_raw(Box::new(desc));
                     desc_ptrs.push(desc_ptr);
                 }
-                SysVarSpec::Int { name, comment, default, min, max, on_change } => {
+                SysVarSpec::Int {
+                    name,
+                    comment,
+                    default,
+                    min,
+                    max,
+                    on_change,
+                } => {
                     let value_ptr: *mut i64 = Box::into_raw(Box::new(*default));
                     let desc = vef_sys_var_desc_t {
                         name: name.as_ptr().cast::<c_char>(),
@@ -124,9 +136,15 @@ impl SysVarCapability {
                     let desc_ptr: *const vef_sys_var_desc_t = Box::into_raw(Box::new(desc));
                     desc_ptrs.push(desc_ptr);
                 }
-                SysVarSpec::Str { name, comment, default, on_change } => {
+                SysVarSpec::Str {
+                    name,
+                    comment,
+                    default,
+                    on_change,
+                } => {
                     // Leak storage for the current value pointer
-                    let value_ptr: *mut *mut c_char = Box::into_raw(Box::new(std::ptr::null_mut::<c_char>()));
+                    let value_ptr: *mut *mut c_char =
+                        Box::into_raw(Box::new(std::ptr::null_mut::<c_char>()));
                     let desc = vef_sys_var_desc_t {
                         name: name.as_ptr().cast::<c_char>(),
                         comment: comment.as_ptr().cast::<c_char>(),
@@ -144,11 +162,13 @@ impl SysVarCapability {
                 }
             }
         }
-        
-        // Leak the array of pointers. 
+
+        // Leak the array of pointers.
         // Get its base pointer and count.
         let var_count = desc_ptrs.len() as u32;
-        let vars_ptr = Box::into_raw(desc_ptrs.into_boxed_slice()).cast::<*const vef_sys_var_desc_t>().cast_const();
+        let vars_ptr = Box::into_raw(desc_ptrs.into_boxed_slice())
+            .cast::<*const vef_sys_var_desc_t>()
+            .cast_const();
 
         // Leak the descriptor list.
         let list = vef_sys_var_descriptor_list_t {
@@ -201,7 +221,7 @@ impl SysVarCapability {
     }
 
     #[must_use]
-     /// Set a system variable owned by `component_name` to `val`, via the
+    /// Set a system variable owned by `component_name` to `val`, via the
     /// `vsql::sys_var` capability.
     ///
     /// `scope` is null (running value only), `"PERSIST"` (running + persisted),
@@ -217,7 +237,7 @@ impl SysVarCapability {
         component_name: *const c_char,
         name: *const c_char,
         scope: *const c_char,
-        val: *const c_char
+        val: *const c_char,
     ) -> Option<bool> {
         let vtable = SYS_VAR_VTABLE.load(Ordering::Acquire);
         if vtable.is_null() {
