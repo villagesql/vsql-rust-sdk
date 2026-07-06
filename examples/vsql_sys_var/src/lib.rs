@@ -30,6 +30,34 @@ unsafe extern "C" fn on_enabled_change(_change: *const vef_sys_var_change_t) {
     CHANGE_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
+/// The system variables this extension declares.
+static SPECS: &[SysVarSpec] = &[
+    SysVarSpec::Bool {
+        name: b"enabled\0",
+        comment: b"Enable the feature\0",
+        default: true,
+        on_change: Some(on_enabled_change),
+    },
+    SysVarSpec::Int {
+        name: b"threshold\0",
+        comment: b"Threshold in milliseconds\0",
+        default: 1000,
+        min: 0,
+        max: 60000,
+        on_change: None,
+    },
+    SysVarSpec::Str {
+        name: b"log_path\0",
+        comment: b"Path to the log file\0",
+        default: b"/tmp/vsql_sys_var.log\0",
+        on_change: None,
+    },
+];
+
+/// The `sys_var` capability instance, declared `static` so it lives for the whole
+/// time the extension is loaded; the server populates it at registration.
+static SYS_VAR: SysVarCapability = SysVarCapability::new(SPECS);
+
 /// SQL: `vsql_sys_var.change_count()` -> INT
 // The change counter never approaches i64::MAX, so this cast cannot wrap.
 #[allow(clippy::cast_possible_wrap)]
@@ -41,28 +69,7 @@ villagesql::extension! {
     funcs: [
         villagesql::func!(change_count_impl, "change_count", [] -> villagesql::Type::Int),
     ],
-    capabilities: [
-        SysVarCapability::request(&[
-            SysVarSpec::Bool {
-                name: b"enabled\0",
-                comment: b"Enable the feature\0",
-                default: true,
-                on_change: Some(on_enabled_change),
-            },
-            SysVarSpec::Int {
-                name: b"threshold\0",
-                comment: b"Threshold in milliseconds\0",
-                default: 1000,
-                min: 0,
-                max: 60000,
-                on_change: None,
-            },
-            SysVarSpec::Str {
-                name: b"log_path\0",
-                comment: b"Path to the log file\0",
-                default: b"/tmp/vsql_sys_var.log\0",
-                on_change: None,
-            },
-        ]),
+    requires: [
+        &SYS_VAR,
     ]
 }

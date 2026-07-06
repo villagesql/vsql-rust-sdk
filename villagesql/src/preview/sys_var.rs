@@ -35,7 +35,7 @@ const _: () = {
     assert!(::std::mem::offset_of!(vef_preview_sys_var_t, set) == 16);
 };
 
-use crate::preview::RequiredCapability;
+use crate::preview::{Capability, RequiredCapability};
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -44,12 +44,6 @@ const VTABLE_HASH: &[u8] = b"ver-1\0";
 
 /// `capability_config` version tag the server matches against.
 const CONFIG_HASH: &[u8] = b"ver-1\0";
-
-/// `'static` slot the server populates with its `vef_preview_sys_var_t*` at load
-/// time. `AtomicPtr<T>` is layout-identical to `*mut T`, so handing its address
-/// to the server as `vtable_dest` is ABI-sound; the atomic just lets the Rust
-/// side read it without a data race.
-static SYS_VAR_VTABLE: AtomicPtr<vef_preview_sys_var_t> = AtomicPtr::new(std::ptr::null_mut());
 
 /// One system variable an extension wants to declare.
 pub enum SysVarSpec {
@@ -75,18 +69,107 @@ pub enum SysVarSpec {
     },
 }
 
-pub struct SysVarCapability;
+pub struct SysVarCapability {
+    /// Slot the server fills with its `vef_preview_sys_var_t*` vtable at load time.
+    /// `AtomicPtr<T>` is layout-identical to `*mut T`, so handing its address to
+    /// the server as `vtable_dest` is safe. The atomic makes it so the Rust side
+    /// can read it without a data race.
+    abi_: AtomicPtr<vef_preview_sys_var_t>,
+    /// The system variables this capability declares.
+    specs: &'static [SysVarSpec],
+}
 
 impl SysVarCapability {
-    /// Build the registration entry the server resolves at load time.
-    /// Declares the extension's system variables as `specs`.
+    /// Create a `sys_var` capability declaring `specs`. Declare it as a `static`
+    /// in your extension and list it via `requires: [&SYS_VAR]`.
+    #[must_use]
+    pub const fn new(specs: &'static [SysVarSpec]) -> Self {
+        Self {
+            abi_: AtomicPtr::new(std::ptr::null_mut()),
+            specs,
+        }
+    }
+
+    /// Read a system variable owned by `component_name` (an extension name),
+    /// via the `vsql::sys_var` capability.
+    ///
+    /// On success the server allocates a NUL-terminated value string into `*val`
+    /// (length into `*val_len`); the caller must free it with the C `free()`.
+    ///
+    /// Returns `None` if the capability is unavailable; otherwise `Some(false)`
+    /// on success and `Some(true)` on error (the C convention is inverted).
+    ///
+    /// # Safety
+    /// `component_name`/`name` must be valid NUL-terminated C strings, and
+    /// `val`/`val_len` valid writable pointers, all valid for the call.
+    #[must_use]
+    pub unsafe fn get(
+        &self,
+        component_name: *const c_char,
+        name: *const c_char,
+        val: *mut *mut c_void,
+        val_len: *mut usize,
+    ) -> Option<bool> {
+        let vtable = self.abi_.load(Ordering::Acquire);
+        if vtable.is_null() {
+            return None;
+        }
+        // Safety: non-null slot written by the server at load time, points to a
+        // 'static vef_preview_sys_var_t the server owns.
+        let vtable = unsafe { &*vtable };
+        if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
+            return None;
+        }
+        let get_fn = vtable.get?;
+        // Safety: server-provided function pointer; pointers valid for the call.
+        Some(unsafe { get_fn(component_name, name, val, val_len) })
+    }
+
+    /// Set a system variable owned by `component_name` to `val`, via the
+    /// `vsql::sys_var` capability.
+    ///
+    /// `scope` is null (running value only), `"PERSIST"` (running + persisted),
+    /// or `"PERSIST_ONLY"` (persisted, applies on restart).
+    ///
+    /// Returns `None` if the capability is unavailable; otherwise `Some(false)`
+    /// on success and `Some(true)` on error (the C convention is inverted).
+    ///
+    /// # Safety
+    /// `component_name`/`name`/`val` must be valid NUL-terminated C strings and
+    /// `scope` null or a valid NUL-terminated C string, all valid for the call.
+    #[must_use]
+    pub unsafe fn set(
+        &self,
+        component_name: *const c_char,
+        name: *const c_char,
+        scope: *const c_char,
+        val: *const c_char,
+    ) -> Option<bool> {
+        let vtable = self.abi_.load(Ordering::Acquire);
+        if vtable.is_null() {
+            return None;
+        }
+        // Safety: non-null slot written by the server at load time, points to a
+        // 'static vef_preview_sys_var_t the server owns.
+        let vtable = unsafe { &*vtable };
+        if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
+            return None;
+        }
+        let set_fn = vtable.set?;
+        // SAFETY: server-provided function pointer; pointers valid for the call.
+        Some(unsafe { set_fn(component_name, name, scope, val) })
+    }
+}
+
+impl Capability for &'static SysVarCapability {
+    /// Build the registration entry the server resolves at load time, declaring
+    /// this capability's system variables.
     ///
     /// # Panics
     /// Panics if the number of declared variables exceeds `u32::MAX`.
-    #[must_use]
-    pub fn request(specs: &[SysVarSpec]) -> RequiredCapability {
-        let mut desc_ptrs: Vec<*const vef_sys_var_desc_t> = Vec::with_capacity(specs.len());
-        for spec in specs {
+    fn request(self) -> RequiredCapability {
+        let mut desc_ptrs: Vec<*const vef_sys_var_desc_t> = Vec::with_capacity(self.specs.len());
+        for spec in self.specs {
             match spec {
                 SysVarSpec::Bool {
                     name,
@@ -182,78 +265,10 @@ impl SysVarCapability {
         RequiredCapability {
             name: VEF_PREVIEW_SYS_VAR_NAME.as_ptr().cast::<c_char>(),
             vtable_hash: VTABLE_HASH.as_ptr().cast::<c_char>(),
-            vtable_dest: SYS_VAR_VTABLE.as_ptr().cast::<*mut c_void>(),
+            vtable_dest: self.abi_.as_ptr().cast::<*mut c_void>(),
             capability_config_hash: CONFIG_HASH.as_ptr().cast::<c_char>(),
             capability_config: list_ptr.cast::<c_void>(),
         }
-    }
-
-    #[must_use]
-    /// Read a system variable owned by `component_name` (an extension name),
-    /// via the `vsql::sys_var` capability.
-    ///
-    /// On success the server allocates a NUL-terminated value string into `*val`
-    /// (length into `*val_len`); the caller must free it with the C `free()`.
-    ///
-    /// Returns `None` if the capability is unavailable; otherwise `Some(false)`
-    /// on success and `Some(true)` on error (the C convention is inverted).
-    ///
-    /// # Safety
-    /// `component_name`/`name` must be valid NUL-terminated C strings, and
-    /// `val`/`val_len` valid writable pointers, all valid for the call.
-    pub unsafe fn get(
-        component_name: *const c_char,
-        name: *const c_char,
-        val: *mut *mut c_void,
-        val_len: *mut usize,
-    ) -> Option<bool> {
-        let vtable = SYS_VAR_VTABLE.load(Ordering::Acquire);
-        if vtable.is_null() {
-            return None;
-        }
-        // Safety: non-null slot written by the server at load time, points to a
-        // 'static vef_preview_sys_var_t the server owns.
-        let vtable = unsafe { &*vtable };
-        if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
-            return None;
-        }
-        let get_fn = vtable.get?;
-        // Safety: server-provided function pointer; pointers valid for the call.
-        Some(unsafe { get_fn(component_name, name, val, val_len) })
-    }
-
-    #[must_use]
-    /// Set a system variable owned by `component_name` to `val`, via the
-    /// `vsql::sys_var` capability.
-    ///
-    /// `scope` is null (running value only), `"PERSIST"` (running + persisted),
-    /// or `"PERSIST_ONLY"` (persisted, applies on restart).
-    ///
-    /// Returns `None` if the capability is unavailable; otherwise `Some(false)`
-    /// on success and `Some(true)` on error (the C convention is inverted).
-    ///
-    /// # Safety
-    /// `component_name`/`name`/`val` must be valid NUL-terminated C strings and
-    /// `scope` null or a valid NUL-terminated C string, all valid for the call.
-    pub unsafe fn set(
-        component_name: *const c_char,
-        name: *const c_char,
-        scope: *const c_char,
-        val: *const c_char,
-    ) -> Option<bool> {
-        let vtable = SYS_VAR_VTABLE.load(Ordering::Acquire);
-        if vtable.is_null() {
-            return None;
-        }
-        // Safety: non-null slot written by the server at load time, points to a
-        // 'static vef_preview_sys_var_t the server owns.
-        let vtable = unsafe { &*vtable };
-        if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
-            return None;
-        }
-        let set_fn = vtable.set?;
-        // SAFETY: server-provided function pointer; pointers valid for the call.
-        Some(unsafe { set_fn(component_name, name, scope, val) })
     }
 }
 
