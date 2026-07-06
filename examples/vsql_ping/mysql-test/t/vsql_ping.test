@@ -1,16 +1,16 @@
 # Tests the vsql::preview::ping capability for the vsql_ping example extension.
-# ping() must return an incrementing counter, proving the server populated our
+# call_ping() must return an incrementing counter, proving the server populated our
 # capability vtable via required_capabilities[].
 
 SET PERSIST vsql_allow_preview_extensions = ON;
 
 INSTALL EXTENSION vsql_ping;
 
---echo # ping() returns a positive integer
-SELECT vsql_ping.ping() > 0 AS ping_positive;
+--echo # call_ping() returns a positive integer
+SELECT vsql_ping.call_ping() > 0 AS ping_positive;
 
 --echo # Consecutive calls return strictly increasing values
-SELECT vsql_ping.ping() < vsql_ping.ping() AS ping_increases;
+SELECT vsql_ping.call_ping() < vsql_ping.call_ping() AS ping_increases;
 
 UNINSTALL EXTENSION vsql_ping;
 
