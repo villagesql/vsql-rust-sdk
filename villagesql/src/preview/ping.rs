@@ -37,7 +37,7 @@ const _: () = {
     assert!(::std::mem::offset_of!(vef_preview_ping_t, ping) == 8);
 };
 
-use crate::preview::RequiredCapability;
+use crate::preview::{Capability, RequiredCapability};
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -45,36 +45,32 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 // is registered as "ver-1"). NUL-terminated; `strcmp`'d server-side.
 const VTABLE_HASH: &[u8] = b"ver-1\0";
 
-/// `'static` slot the server populates with its `vef_preview_ping_t*` at load
-/// time. `AtomicPtr<T>` is layout-identical to `*mut T`, so handing its address
-/// to the server as `vtable_dest` is ABI-sound; the atomic just lets the Rust
-/// side read it without a data race.
-static PING_VTABLE: AtomicPtr<vef_preview_ping_t> = AtomicPtr::new(std::ptr::null_mut());
-
-/// The `vsql::preview::ping` capability. Declare it in an extension via
-/// `capabilities: [ PingCapability::request() ]`, then call
-/// [`PingCapability::ping`] at runtime once the server has populated it.
-pub struct PingCapability;
+/// The `vsql::preview::ping` capability. Declare it in your extension and
+/// list it via `requires: [&PING]`; the server populates it at load time,
+/// after which [`PingCapability::ping`] returns the counter.
+pub struct PingCapability {
+    /// The slot the server fills with it's `vef_preview_pint_t*` vtable
+    /// at load time. `AtomicPtr<T>` is layout-identical to `*mut T`, so
+    /// handing its address to the server as `vtable_dest` is safe. The
+    /// atomic makes it so the Rust side read it without a data race.
+    abi_: AtomicPtr<vef_preview_ping_t>,
+}
 
 impl PingCapability {
-    /// Build the registration entry the server resolves at load time.
+    /// Create a ping capability. Declare it as a `static` and list it in your extension's `requires: [ ... ]`.
     #[must_use]
-    pub fn request() -> RequiredCapability {
-        RequiredCapability {
-            name: VEF_PREVIEW_PING_NAME.as_ptr().cast::<c_char>(),
-            vtable_hash: VTABLE_HASH.as_ptr().cast::<c_char>(),
-            vtable_dest: PING_VTABLE.as_ptr().cast::<*mut c_void>(),
-            capability_config_hash: std::ptr::null(),
-            capability_config: std::ptr::null(),
+    #[allow(clippy::new_without_default)]
+    pub const fn new() -> Self {
+        Self {
+            abi_: AtomicPtr::new(std::ptr::null_mut()),
         }
     }
-
     /// Call the server's `ping()` counter. Returns `None` if the capability was
     /// not populated (preview disabled / not requested) or the server's ABI
     /// version is too old to provide `ping`.
     #[must_use]
-    pub fn ping() -> Option<u64> {
-        let vtable = PING_VTABLE.load(Ordering::Acquire);
+    pub fn ping(&self) -> Option<u64> {
+        let vtable = self.abi_.load(Ordering::Acquire);
         if vtable.is_null() {
             return None;
         }
@@ -87,5 +83,17 @@ impl PingCapability {
         let ping_fn = vtable.ping?;
         // SAFETY: server-provided no-argument function pointer.
         Some(unsafe { ping_fn() })
+    }
+}
+
+impl Capability for &'static PingCapability {
+    fn request(self) -> RequiredCapability {
+        RequiredCapability {
+            name: VEF_PREVIEW_PING_NAME.as_ptr().cast::<c_char>(),
+            vtable_hash: VTABLE_HASH.as_ptr().cast::<c_char>(),
+            vtable_dest: self.abi_.as_ptr().cast::<*mut c_void>(),
+            capability_config_hash: std::ptr::null(),
+            capability_config: std::ptr::null(),
+        }
     }
 }

@@ -26,6 +26,15 @@ pub struct RequiredCapability {
     pub capability_config: *const c_void,
 }
 
+/// A capability an extension requests from the server. Implemented for a
+/// `&'static` reference to each capability instance, so the `extension!` macro
+/// can call `.request()` on the values you list in `requires: [ ... ]`.
+pub trait Capability {
+    /// Build the registration entry the server resolves at load time.
+    #[must_use]
+    fn request(self) -> RequiredCapability;
+}
+
 impl RequiredCapability {
     /// Converts to the FFI structure.
     #[allow(clippy::wrong_self_convention)] // &self is correct here; we don't want to consume the struct

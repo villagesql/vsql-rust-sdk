@@ -499,11 +499,11 @@ macro_rules! custom {
 /// The `types:` list is optional; omitting it is equivalent to `types: []`.
 #[macro_export]
 macro_rules! extension {
-    // Canonical form: funcs + types + capabilities.
+    // Canonical form: funcs + types + requires.
     (
         funcs: [ $( $func_desc:expr ),* $(,)? ],
         types: [ $( $type_desc:expr ),* $(,)? ],
-        capabilities: [ $( $cap:expr ),* $(,)? ] $(,)?
+        requires: [ $( $cap:expr ),* $(,)? ] $(,)?
     ) => {
         #[no_mangle]
         pub unsafe extern "C" fn vef_register(
@@ -511,7 +511,7 @@ macro_rules! extension {
         ) -> *mut $crate::sys::vef_registration_t {
             let funcs: &[$crate::FuncDescriptor] = &[$($func_desc),*];
             let types: ::std::vec::Vec<$crate::TypeWithFuncs> = vec![$($type_desc),*];
-            let caps: &[$crate::preview::RequiredCapability] = &[$($cap),*];
+            let caps: &[$crate::preview::RequiredCapability] = &[$($crate::preview::Capability::request($cap)),*];
             $crate::build_registration(funcs, &types, caps)
         }
 
@@ -524,7 +524,7 @@ macro_rules! extension {
         }
     };
 
-    // funcs + types (no capabilities).
+    // funcs + types (no requires).
     (
         funcs: [ $( $func_desc:expr ),* $(,)? ],
         types: [ $( $type_desc:expr ),* $(,)? ] $(,)?
@@ -532,19 +532,19 @@ macro_rules! extension {
         $crate::extension! {
             funcs: [ $($func_desc),* ],
             types: [ $($type_desc),* ],
-            capabilities: []
+            requires: []
         }
     };
 
-    // funcs + capabilities (no custom types).
+    // funcs + requires (no custom types).
     (
         funcs: [ $( $func_desc:expr ),* $(,)? ],
-        capabilities: [ $( $cap:expr ),* $(,)? ] $(,)?
+        requires: [ $( $cap:expr ),* $(,)? ] $(,)?
     ) => {
         $crate::extension! {
             funcs: [ $($func_desc),* ],
             types: [],
-            capabilities: [ $($cap),* ]
+            requires: [ $($cap),* ]
         }
     };
 
@@ -555,7 +555,7 @@ macro_rules! extension {
         $crate::extension! {
             funcs: [ $($func_desc),* ],
             types: [],
-            capabilities: []
+            requires: []
         }
     };
 }
