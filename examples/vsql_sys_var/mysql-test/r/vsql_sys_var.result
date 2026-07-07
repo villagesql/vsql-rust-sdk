@@ -18,13 +18,23 @@ SET GLOBAL vsql_sys_var.enabled = 1;
 SELECT vsql_sys_var.change_count();
 vsql_sys_var.change_count()
 2
-# INT: default is 1000, settable within its declared range
+# INT: default is 1000
 SELECT @@global.vsql_sys_var.threshold;
 @@global.vsql_sys_var.threshold
 1000
-SET GLOBAL vsql_sys_var.threshold = 500;
+# Read it back through the Rust get() accessor (not SQL)
+SELECT vsql_sys_var.read_threshold();
+vsql_sys_var.read_threshold()
+1000
+# Set it to 500 through the Rust set() accessor, then confirm via SQL and get()
+SELECT vsql_sys_var.set_threshold_500();
+vsql_sys_var.set_threshold_500()
+1
 SELECT @@global.vsql_sys_var.threshold;
 @@global.vsql_sys_var.threshold
+500
+SELECT vsql_sys_var.read_threshold();
+vsql_sys_var.read_threshold()
 500
 # STRING: default path, settable to a new value
 SELECT @@global.vsql_sys_var.log_path;

@@ -1,4 +1,5 @@
-# Tests the vsql::sys_var capability for the vsql_sys_var example extension.
+# Tests the vsql::sys_var capability for the vsql_sys_var example extension
+# and exercises the Rust get/set accessors via read_threshold()/set_threshold_500().
 # The extension declares one variable of each server-supported type (bool, int,
 # string) plus an on_change callback on the bool. This proves both directions of
 # the capability: declaring variables (Flavor B config) and the server calling
@@ -17,10 +18,16 @@ SELECT vsql_sys_var.change_count();
 SET GLOBAL vsql_sys_var.enabled = 1;
 SELECT vsql_sys_var.change_count();
 
---echo # INT: default is 1000, settable within its declared range
+--echo # INT: default is 1000
 SELECT @@global.vsql_sys_var.threshold;
-SET GLOBAL vsql_sys_var.threshold = 500;
+
+--echo # Read it back through the Rust get() accessor (not SQL)
+SELECT vsql_sys_var.read_threshold();
+
+--echo # Set it to 500 through the Rust set() accessor, then confirm via SQL and get()
+SELECT vsql_sys_var.set_threshold_500();
 SELECT @@global.vsql_sys_var.threshold;
+SELECT vsql_sys_var.read_threshold();
 
 --echo # STRING: default path, settable to a new value
 SELECT @@global.vsql_sys_var.log_path;

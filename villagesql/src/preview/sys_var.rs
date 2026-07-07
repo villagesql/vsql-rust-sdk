@@ -16,7 +16,7 @@ pub const VEF_PREVIEW_SYS_VAR_NAME: &[u8] = b"vsql::sys_var\0";
 
 /// Server-provided vtable for the `sys_var` capability
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Debug, Copy, Clone)]
 pub struct vef_preview_sys_var_t {
     /// The ABI version.
     pub version: u32,
@@ -36,7 +36,7 @@ const _: () = {
 };
 
 use crate::preview::{Capability, RequiredCapability};
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_void, CStr};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 // ABI version tag the server matches against
@@ -48,27 +48,30 @@ const CONFIG_HASH: &[u8] = b"ver-1\0";
 /// One system variable an extension wants to declare.
 pub enum SysVarSpec {
     Bool {
-        name: &'static [u8],    // NUL-terminated, e.g. b"enabled\0"
-        comment: &'static [u8], // NUL-terminated, e.g. b"Enable the feature\0"
+        name: &'static CStr,
+        comment: &'static CStr,
         default: bool,
         on_change: vef_sys_var_on_change_func_t, // optional callback for when the value changes
     },
     Int {
-        name: &'static [u8],
-        comment: &'static [u8],
+        name: &'static CStr,
+        comment: &'static CStr,
         default: i64,
         min: i64,
         max: i64,
         on_change: vef_sys_var_on_change_func_t,
     },
     Str {
-        name: &'static [u8],
-        comment: &'static [u8],
-        default: &'static [u8], // NUL-terminated
+        name: &'static CStr,
+        comment: &'static CStr,
+        default: &'static CStr,
         on_change: vef_sys_var_on_change_func_t,
     },
 }
-
+/// The `vsql::sys_var` capability. Declare it as a `static` in your extension
+/// and list it via `requires: [ &SYS_VAR ] `; the server populates it at load
+/// time, after which [`SysVarCapability::get`] and [`SysVarCapability::set`] work
+/// and the declared variables are registered.
 pub struct SysVarCapability {
     /// Slot the server fills with its `vef_preview_sys_var_t*` vtable at load time.
     /// `AtomicPtr<T>` is layout-identical to `*mut T`, so handing its address to
@@ -93,15 +96,23 @@ impl SysVarCapability {
     /// Read a system variable owned by `component_name` (an extension name),
     /// via the `vsql::sys_var` capability.
     ///
-    /// On success the server allocates a NUL-terminated value string into `*val`
-    /// (length into `*val_len`); the caller must free it with the C `free()`.
+    /// # Returns
+    /// - `None` — the capability is unavailable (preview disabled / not
+    ///   requested, or the server's ABI is too old / `get` unset).
+    /// - `Some(false)` — **success**: the server wrote a newly `malloc`'d,
+    ///   NUL-terminated value string into `*val` and its length into `*val_len`.
+    /// - `Some(true)` — the server reported an error; `*val`/`*val_len` are left
+    ///   untouched.
     ///
-    /// Returns `None` if the capability is unavailable; otherwise `Some(false)`
-    /// on success and `Some(true)` on error (the C convention is inverted).
+    /// (Note the inverted C convention: `false` means success.)
     ///
     /// # Safety
-    /// `component_name`/`name` must be valid NUL-terminated C strings, and
-    /// `val`/`val_len` valid writable pointers, all valid for the call.
+    /// - `component_name` and `name` must be valid, NUL-terminated C strings;
+    ///   `val` and `val_len` must be valid, writable pointers — all valid for
+    ///   the duration of the call.
+    /// - `*val` is written **only** on `Some(false)`; you must then release it
+    ///   with the C `free()`. On `Some(true)` or `None`, do not read or free
+    ///   `*val` — it was not written.
     #[must_use]
     pub unsafe fn get(
         &self,
@@ -114,29 +125,34 @@ impl SysVarCapability {
         if vtable.is_null() {
             return None;
         }
-        // Safety: non-null slot written by the server at load time, points to a
+        // SAFETY: non-null slot written by the server at load time, points to a
         // 'static vef_preview_sys_var_t the server owns.
         let vtable = unsafe { &*vtable };
         if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
             return None;
         }
         let get_fn = vtable.get?;
-        // Safety: server-provided function pointer; pointers valid for the call.
+        // SAFETY: server-provided function pointer; pointers valid for the call.
         Some(unsafe { get_fn(component_name, name, val, val_len) })
     }
 
     /// Set a system variable owned by `component_name` to `val`, via the
     /// `vsql::sys_var` capability.
     ///
-    /// `scope` is null (running value only), `"PERSIST"` (running + persisted),
-    /// or `"PERSIST_ONLY"` (persisted, applies on restart).
+    /// `scope` selects persistence: `null` = running value only, `"PERSIST"` =
+    /// running value + persisted, `"PERSIST_ONLY"` = persisted (applies on
+    /// restart).
     ///
-    /// Returns `None` if the capability is unavailable; otherwise `Some(false)`
-    /// on success and `Some(true)` on error (the C convention is inverted).
+    /// # Returns
+    /// - `None` — the capability is unavailable (preview disabled / not
+    ///   requested, or the server's ABI is too old / `set` unset).
+    /// - `Some(false)` — **success** (note the inverted C convention).
+    /// - `Some(true)` — the server reported an error.
     ///
     /// # Safety
-    /// `component_name`/`name`/`val` must be valid NUL-terminated C strings and
-    /// `scope` null or a valid NUL-terminated C string, all valid for the call.
+    /// `component_name`, `name`, and `val` must be valid, NUL-terminated C
+    /// strings; `scope` must be null or a valid NUL-terminated C string — all
+    /// valid for the duration of the call.
     #[must_use]
     pub unsafe fn set(
         &self,
@@ -149,7 +165,7 @@ impl SysVarCapability {
         if vtable.is_null() {
             return None;
         }
-        // Safety: non-null slot written by the server at load time, points to a
+        // SAFETY: non-null slot written by the server at load time, points to a
         // 'static vef_preview_sys_var_t the server owns.
         let vtable = unsafe { &*vtable };
         if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
@@ -168,33 +184,36 @@ impl Capability for &'static SysVarCapability {
     /// # Panics
     /// Panics if the number of declared variables exceeds `u32::MAX`.
     fn request(self) -> RequiredCapability {
+        // Everything allocated here (value storage, descriptors, the pointer
+        // array, and the list) is deliberately leaked with `Box::into_raw`: the
+        // server keeps `capability_config` for the extension's lifetime, so it
+        // must outlive this call and is intentionally NOT freed in
+        // `free_registration`.
         let mut desc_ptrs: Vec<*const vef_sys_var_desc_t> = Vec::with_capacity(self.specs.len());
         for spec in self.specs {
-            match spec {
+            // Each arm leaks storage for the variable's current value and yields
+            // the type-specific (type_, value) pair. The shared descriptor build,
+            // leak, and push happen once below.
+            let (name, comment, on_change, type_, value) = match spec {
                 SysVarSpec::Bool {
                     name,
                     comment,
                     default,
                     on_change,
                 } => {
-                    // Leak storage for the current value pointer
                     let value_ptr: *mut bool = Box::into_raw(Box::new(*default));
-                    let desc = vef_sys_var_desc_t {
-                        name: name.as_ptr().cast::<c_char>(),
-                        comment: comment.as_ptr().cast::<c_char>(),
-                        type_: VEF_VAR_BOOL,
-                        on_change: *on_change,
-                        value: vef_sys_var_value_t {
+                    (
+                        name,
+                        comment,
+                        on_change,
+                        VEF_VAR_BOOL,
+                        vef_sys_var_value_t {
                             boolean: vef_sys_var_bool_t {
                                 value_ptr,
                                 def_val: *default,
                             },
                         },
-                    };
-
-                    // Leak the descriptor; keep a *const pointer to it.
-                    let desc_ptr: *const vef_sys_var_desc_t = Box::into_raw(Box::new(desc));
-                    desc_ptrs.push(desc_ptr);
+                    )
                 }
                 SysVarSpec::Int {
                     name,
@@ -205,12 +224,12 @@ impl Capability for &'static SysVarCapability {
                     on_change,
                 } => {
                     let value_ptr: *mut i64 = Box::into_raw(Box::new(*default));
-                    let desc = vef_sys_var_desc_t {
-                        name: name.as_ptr().cast::<c_char>(),
-                        comment: comment.as_ptr().cast::<c_char>(),
-                        type_: VEF_VAR_INT,
-                        on_change: *on_change,
-                        value: vef_sys_var_value_t {
+                    (
+                        name,
+                        comment,
+                        on_change,
+                        VEF_VAR_INT,
+                        vef_sys_var_value_t {
                             integer: vef_sys_var_int_t {
                                 value_ptr,
                                 def_val: *default,
@@ -218,9 +237,7 @@ impl Capability for &'static SysVarCapability {
                                 max_val: *max,
                             },
                         },
-                    };
-                    let desc_ptr: *const vef_sys_var_desc_t = Box::into_raw(Box::new(desc));
-                    desc_ptrs.push(desc_ptr);
+                    )
                 }
                 SysVarSpec::Str {
                     name,
@@ -228,25 +245,32 @@ impl Capability for &'static SysVarCapability {
                     default,
                     on_change,
                 } => {
-                    // Leak storage for the current value pointer
                     let value_ptr: *mut *mut c_char =
                         Box::into_raw(Box::new(std::ptr::null_mut::<c_char>()));
-                    let desc = vef_sys_var_desc_t {
-                        name: name.as_ptr().cast::<c_char>(),
-                        comment: comment.as_ptr().cast::<c_char>(),
-                        type_: VEF_VAR_STR,
-                        on_change: *on_change,
-                        value: vef_sys_var_value_t {
+                    (
+                        name,
+                        comment,
+                        on_change,
+                        VEF_VAR_STR,
+                        vef_sys_var_value_t {
                             str_: vef_sys_var_str_t {
                                 value_ptr,
                                 def_val: default.as_ptr().cast::<c_char>(),
                             },
                         },
-                    };
-                    let desc_ptr: *const vef_sys_var_desc_t = Box::into_raw(Box::new(desc));
-                    desc_ptrs.push(desc_ptr);
+                    )
                 }
-            }
+            };
+
+            let desc = vef_sys_var_desc_t {
+                name: name.as_ptr().cast::<c_char>(),
+                comment: comment.as_ptr().cast::<c_char>(),
+                type_,
+                on_change: *on_change,
+                value,
+            };
+            let desc_ptr: *const vef_sys_var_desc_t = Box::into_raw(Box::new(desc));
+            desc_ptrs.push(desc_ptr);
         }
 
         // Leak the array of pointers. Get its base pointer and count.
