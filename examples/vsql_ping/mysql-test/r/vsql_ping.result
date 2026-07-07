@@ -1,0 +1,13 @@
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_ping;
+# call_ping() returns a positive integer
+SELECT vsql_ping.call_ping() > 0 AS ping_positive;
+ping_positive
+1
+# Consecutive calls return strictly increasing values
+SELECT vsql_ping.call_ping() < vsql_ping.call_ping() AS ping_increases;
+ping_increases
+1
+UNINSTALL EXTENSION vsql_ping;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

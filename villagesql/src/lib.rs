@@ -11,16 +11,19 @@
 
 pub use paste;
 pub use villagesql_sys as sys;
+pub mod preview;
 
 use std::ffi::c_char;
 use villagesql_sys::{
-    vef_func_desc_t, vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t,
+    vef_func_desc_t, vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t, vef_required_capability_t,
     vef_return_value_type_t_VEF_RESULT_ERROR, vef_return_value_type_t_VEF_RESULT_NULL,
     vef_return_value_type_t_VEF_RESULT_VALUE, vef_return_value_type_t_VEF_RESULT_WARNING,
     vef_signature_t, vef_type_desc_t, vef_type_id_VEF_TYPE_CUSTOM, vef_type_id_VEF_TYPE_INT,
     vef_type_id_VEF_TYPE_REAL, vef_type_id_VEF_TYPE_STRING, vef_type_t, vef_vdf_args_t,
     vef_vdf_result_t, vef_version_t, VEF_MAX_ERROR_LEN,
 };
+
+use crate::preview::RequiredCapability;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -347,6 +350,7 @@ unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
 pub unsafe fn build_registration(
     funcs: &[FuncDescriptor],
     types: &[TypeWithFuncs],
+    caps: &[RequiredCapability],
 ) -> *mut vef_registration_t {
     // ── Functions: explicit + embedded from each type ─────────────────────────
     let mut func_ptrs: Vec<*mut vef_func_desc_t> = Vec::new();
@@ -386,6 +390,11 @@ pub unsafe fn build_registration(
     }
     let type_count = u32::try_from(type_ptrs.len()).expect("type count exceeds u32");
     let types_ptr = Box::into_raw(type_ptrs.into_boxed_slice()).cast::<*mut vef_type_desc_t>();
+    let cap_raws: Box<[vef_required_capability_t]> =
+        caps.iter().map(RequiredCapability::to_raw).collect();
+    let cap_count = u32::try_from(cap_raws.len()).expect("capability count exceeds u32");
+    let caps_ptr: *const vef_required_capability_t =
+        Box::into_raw(cap_raws).cast::<vef_required_capability_t>();
 
     Box::into_raw(Box::new(vef_registration_t {
         protocol: vef_protocol_t_VEF_PROTOCOL_3,
@@ -402,8 +411,8 @@ pub unsafe fn build_registration(
         funcs: funcs_ptr,
         type_count,
         types: types_ptr,
-        required_capability_count: 0,
-        required_capabilities: std::ptr::null(),
+        required_capability_count: cap_count,
+        required_capabilities: caps_ptr,
     }))
 }
 
@@ -444,6 +453,11 @@ pub unsafe fn free_registration(registration: *mut vef_registration_t) {
         reg.type_count as usize,
     )));
 
+    // Free required capabilities.
+    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+        reg.required_capabilities.cast_mut(),
+        reg.required_capability_count as usize,
+    )));
     drop(reg);
 }
 
@@ -485,10 +499,11 @@ macro_rules! custom {
 /// The `types:` list is optional; omitting it is equivalent to `types: []`.
 #[macro_export]
 macro_rules! extension {
-    // With types list.
+    // Canonical form: funcs + types + requires.
     (
         funcs: [ $( $func_desc:expr ),* $(,)? ],
-        types: [ $( $type_desc:expr ),* $(,)? ] $(,)?
+        types: [ $( $type_desc:expr ),* $(,)? ],
+        requires: [ $( $cap:expr ),* $(,)? ] $(,)?
     ) => {
         #[no_mangle]
         pub unsafe extern "C" fn vef_register(
@@ -496,7 +511,8 @@ macro_rules! extension {
         ) -> *mut $crate::sys::vef_registration_t {
             let funcs: &[$crate::FuncDescriptor] = &[$($func_desc),*];
             let types: ::std::vec::Vec<$crate::TypeWithFuncs> = vec![$($type_desc),*];
-            $crate::build_registration(funcs, &types)
+            let caps: &[$crate::preview::RequiredCapability] = &[$($crate::preview::Capability::request($cap)),*];
+            $crate::build_registration(funcs, &types, caps)
         }
 
         #[no_mangle]
@@ -507,13 +523,39 @@ macro_rules! extension {
             $crate::free_registration(registration);
         }
     };
-    // Without types list (backward compatible).
+
+    // funcs + types (no requires).
+    (
+        funcs: [ $( $func_desc:expr ),* $(,)? ],
+        types: [ $( $type_desc:expr ),* $(,)? ] $(,)?
+    ) => {
+        $crate::extension! {
+            funcs: [ $($func_desc),* ],
+            types: [ $($type_desc),* ],
+            requires: []
+        }
+    };
+
+    // funcs + requires (no custom types).
+    (
+        funcs: [ $( $func_desc:expr ),* $(,)? ],
+        requires: [ $( $cap:expr ),* $(,)? ] $(,)?
+    ) => {
+        $crate::extension! {
+            funcs: [ $($func_desc),* ],
+            types: [],
+            requires: [ $($cap),* ]
+        }
+    };
+
+    // funcs only (backward compatible).
     (
         funcs: [ $( $func_desc:expr ),* $(,)? ] $(,)?
     ) => {
         $crate::extension! {
             funcs: [ $($func_desc),* ],
-            types: []
+            types: [],
+            requires: []
         }
     };
 }
