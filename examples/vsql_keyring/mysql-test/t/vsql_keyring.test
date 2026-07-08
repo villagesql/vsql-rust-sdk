@@ -1,0 +1,27 @@
+# Tests the vsql::preview::keyring capability for the vsql_keyring example.
+# Requires the keyring_file component. Storing a secret and reading it back
+# proves the Rust write/read accessors reach the server's keyring vtable.
+
+--source include/have_component_keyring_file.inc
+--source suite/component_keyring_file/inc/setup_component.inc
+
+SET PERSIST vsql_allow_preview_extensions = ON;
+
+INSTALL EXTENSION vsql_keyring;
+
+--echo # Store a secret, then read it back (store returns 0 = VEF_KEYRING_OK)
+SELECT vsql_keyring.keyring_store('vsql_test_key', NULL, 'my_secret_value');
+SELECT vsql_keyring.keyring_read('vsql_test_key', NULL);
+
+--echo # A non-existent key reads back as NULL
+SELECT vsql_keyring.keyring_read('vsql_no_such_key', NULL) IS NULL;
+
+--echo # A NULL data_id reads back as NULL
+SELECT vsql_keyring.keyring_read(NULL, NULL) IS NULL;
+
+UNINSTALL EXTENSION vsql_keyring;
+
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;
+
+--source suite/component_keyring_file/inc/teardown_component.inc
