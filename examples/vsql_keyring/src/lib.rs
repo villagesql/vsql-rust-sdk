@@ -19,7 +19,7 @@ use villagesql::{InValue, VdfReturn};
 /// The keyring capability instance, declared `static` for the extension's life.
 static KEYRING: KeyringCapability = KeyringCapability::new();
 
-/// Largest secret this example can read back. The MySQL keyring has no
+/// Largest secret this example can read back. The `MySQL` keyring has no
 /// size-probe: `read_keyring` returns `NOT_FOUND` (not the real length) when a
 /// secret is bigger than the buffer we hand it, so a fixed cap is the best this
 /// ABI allows — a larger secret reads back as SQL NULL. Kept in sync with
