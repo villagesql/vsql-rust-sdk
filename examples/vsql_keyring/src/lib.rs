@@ -63,8 +63,8 @@ fn keyring_store_impl(args: &[InValue]) -> VdfReturn {
 /// SQL: `vsql_keyring.keyring_read(data_id, auth_id)` -> STRING
 ///
 /// Reads the secret stored under `data_id`. Returns the value on success, or NULL
-/// if `data_id` is missing/NULL, the key doesn't exist, or the capability is
-/// unavailable.
+/// if `data_id` is missing/NULL, the key doesn't exist, the capability is
+/// unavailable, or the secret isn't valid UTF-8 text.
 fn keyring_read_impl(args: &[InValue]) -> VdfReturn {
     let Some(data_id) = arg_cstr(args.first()) else {
         return VdfReturn::null();
@@ -89,7 +89,10 @@ fn keyring_read_impl(args: &[InValue]) -> VdfReturn {
     match result {
         Some(r) if r == VEF_KEYRING_OK => {
             let n = out_len.min(buf.len());
-            VdfReturn::string(String::from_utf8_lossy(&buf[..n]).into_owned())
+            match std::str::from_utf8(&buf[..n]) {
+                Ok(s) => VdfReturn::string(s),
+                Err(_) => VdfReturn::null(),
+            }
         }
         _ => VdfReturn::null(),
     }
