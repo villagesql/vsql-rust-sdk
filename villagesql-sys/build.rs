@@ -16,15 +16,17 @@ fn regenerate() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let include_dir = manifest_dir.parent().unwrap().join("include");
     let out_dir = manifest_dir.join("src/bindings");
-    std::fs::create_dir_all(&out_dir).expect("create bindings dir");
+    std::fs::create_dir_all(out_dir.join("preview")).expect("create bindings dir");
 
-    // (header path relative to include/, output file name)
     let headers = [
         ("villagesql/abi/types.h", "types.rs"),
-        ("villagesql/abi/preview/ping.h", "ping.rs"),
-        ("villagesql/abi/preview/sys_var.h", "sys_var.rs"),
-        ("villagesql/abi/preview/status_var.h", "status_var.rs"),
-        ("villagesql/abi/preview/keyring.h", "keyring.rs"),
+        ("villagesql/abi/preview/ping.h", "preview/ping.rs"),
+        ("villagesql/abi/preview/sys_var.h", "preview/sys_var.rs"),
+        (
+            "villagesql/abi/preview/status_var.h",
+            "preview/status_var.rs",
+        ),
+        ("villagesql/abi/preview/keyring.h", "preview/keyring.rs"),
     ];
 
     for (header, out_file) in headers {

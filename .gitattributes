@@ -1,1 +1,1 @@
-villagesql-sys/src/bindings/*.rs linguist-generated=true
+villagesql-sys/src/bindings/**/*.rs linguist-generated=true

@@ -4,7 +4,7 @@
 #![allow(clippy::all, clippy::pedantic)]
 
 include!("bindings/types.rs");
-include!("bindings/ping.rs");
-include!("bindings/sys_var.rs");
-include!("bindings/status_var.rs");
-include!("bindings/keyring.rs");
+include!("bindings/preview/ping.rs");
+include!("bindings/preview/sys_var.rs");
+include!("bindings/preview/status_var.rs");
+include!("bindings/preview/keyring.rs");
