@@ -3,4 +3,8 @@
 #![allow(non_snake_case)]
 #![allow(clippy::all, clippy::pedantic)]
 
-include!("bindings.rs");
+include!("bindings/types.rs");
+include!("bindings/ping.rs");
+include!("bindings/sys_var.rs");
+include!("bindings/status_var.rs");
+include!("bindings/keyring.rs");

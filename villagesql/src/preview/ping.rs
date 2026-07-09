@@ -1,43 +1,13 @@
-//! ABI definitions for the '`vsql::preview::ping`' capability.
+//! Idiomatic wrapper for the `vsql::preview::ping` capability.
+//! Raw ABI is generated in villagesql-sys.
 //!
 //! Based on the server header `villagesql/stable_sdk/v3/include/villagesql/
 //! abi/preview/ping.h`.
 //! This is a preview capability. The ABI is version-gated via the 'version' field
 //! and may change in future versions.
-//! Keep this struct byte for byte compatible with the server implementation.
-
-#![allow(non_camel_case_types)]
-
-/// Capability ABI version this SDK snapshot was written against.
-pub const VEF_PREVIEW_PING_ABI_VERSION: u32 = 1;
-
-/// Capability name. NUL-terminated string for FFI.
-pub const VEF_PREVIEW_PING_NAME: &[u8] = b"vsql::preview::ping\0";
-
-/// `uint64_t (*)(void)` — returns a monotonically incrementing counter.
-///
-/// Modeled as  `Option<fn>` to match bindgen's nullable-fn-pointer convention.
-pub type vef_ping_fn = Option<unsafe extern "C" fn() -> u64>;
-
-/// Server-provided vtable for the ping capability
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vef_preview_ping_t {
-    /// The version of the ABI.
-    pub version: u32,
-    /// version >= 1
-    pub ping: vef_ping_fn,
-}
-
-/// Guard the layout against drift from the C header (64-bit alignment).
-const _: () = {
-    assert!(::std::mem::size_of::<vef_preview_ping_t>() == 16);
-    assert!(::std::mem::align_of::<vef_preview_ping_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_preview_ping_t, version) == 0);
-    assert!(::std::mem::offset_of!(vef_preview_ping_t, ping) == 8);
-};
 
 use crate::preview::{Capability, RequiredCapability};
+use crate::sys::{vef_preview_ping_t, VEF_PREVIEW_PING_ABI_VERSION, VEF_PREVIEW_PING_NAME};
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -49,7 +19,7 @@ const VTABLE_HASH: &[u8] = b"ver-1\0";
 /// list it via `requires: [&PING]`; the server populates it at load time,
 /// after which [`PingCapability::ping`] returns the counter.
 pub struct PingCapability {
-    /// The slot the server fills with it's `vef_preview_pint_t*` vtable
+    /// The slot the server fills with its `vef_preview_ping_t*` vtable
     /// at load time. `AtomicPtr<T>` is layout-identical to `*mut T`, so
     /// handing its address to the server as `vtable_dest` is safe. The
     /// atomic makes it so the Rust side read it without a data race.
