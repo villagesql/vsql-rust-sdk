@@ -1,41 +1,32 @@
-//! ABI definitions for the '`vsql::sys_var`' capability.
+//! Idiomatic wrapper for the `vsql::sys_var` capability.
+//! Raw ABI is generated in villagesql-sys.
 //!
 //! Based on the server header `villagesql/stable_sdk/v3/include/villagesql/
 //! abi/preview/sys_var.h`.
 //! This is a preview capability. The ABI is version-gated via the 'version' field
 //! and may change in future versions.
-//! Keep this struct byte for byte compatible with the server implementation.
-
-#![allow(non_camel_case_types)]
-
-/// Capability ABI version this SDK snapshot was written against.
-pub const VEF_PREVIEW_SYS_VAR_ABI_VERSION: u32 = 1;
-
-/// Capability name. NUL-terminated string for FFI.
-pub const VEF_PREVIEW_SYS_VAR_NAME: &[u8] = b"vsql::sys_var\0";
-
-/// Server-provided vtable for the `sys_var` capability
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vef_preview_sys_var_t {
-    /// The ABI version.
-    pub version: u32,
-    /// The 'get' function.
-    pub get: vef_sys_var_get_func_t,
-    /// The 'set' function.
-    pub set: vef_sys_var_set_func_t,
-}
-
-/// Guard the layout against drift from the C header.
-const _: () = {
-    assert!(::std::mem::size_of::<vef_preview_sys_var_t>() == 24);
-    assert!(::std::mem::align_of::<vef_preview_sys_var_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_preview_sys_var_t, version) == 0);
-    assert!(::std::mem::offset_of!(vef_preview_sys_var_t, get) == 8);
-    assert!(::std::mem::offset_of!(vef_preview_sys_var_t, set) == 16);
-};
 
 use crate::preview::{Capability, RequiredCapability};
+use crate::sys::{
+    vef_preview_sys_var_t, vef_sys_var_desc_t, vef_sys_var_descriptor_list_t,
+    vef_sys_var_on_change_func_t, VEF_PREVIEW_SYS_VAR_ABI_VERSION, VEF_PREVIEW_SYS_VAR_NAME,
+};
+
+// bindgen names the anonymous value union and its arms in sys_var.h as
+// `vef_sys_var_desc_t__bindgen_ty_1[__bindgen_ty_N]` (because they're unnamed
+// in C). Those synthesized names are not stable across header edits, so alias
+// them to readable names here. `request()` uses the aliases, and a future
+// renumber is a one-line fix confined to this block. Ideal long-term fix:
+// name the union in the server header.
+use crate::sys::{
+    vef_sys_var_desc_t__bindgen_ty_1 as SysVarValue,
+    vef_sys_var_desc_t__bindgen_ty_1__bindgen_ty_1 as SysVarBool,
+    vef_sys_var_desc_t__bindgen_ty_1__bindgen_ty_2 as SysVarInt,
+    vef_sys_var_desc_t__bindgen_ty_1__bindgen_ty_4 as SysVarStr,
+    vef_var_type_t_VEF_VAR_BOOL as VEF_VAR_BOOL, vef_var_type_t_VEF_VAR_INT as VEF_VAR_INT,
+    vef_var_type_t_VEF_VAR_STR as VEF_VAR_STR,
+};
+
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -207,8 +198,8 @@ impl Capability for &'static SysVarCapability {
                         comment,
                         on_change,
                         VEF_VAR_BOOL,
-                        vef_sys_var_value_t {
-                            boolean: vef_sys_var_bool_t {
+                        SysVarValue {
+                            boolean: SysVarBool {
                                 value_ptr,
                                 def_val: *default,
                             },
@@ -229,8 +220,8 @@ impl Capability for &'static SysVarCapability {
                         comment,
                         on_change,
                         VEF_VAR_INT,
-                        vef_sys_var_value_t {
-                            integer: vef_sys_var_int_t {
+                        SysVarValue {
+                            integer: SysVarInt {
                                 value_ptr,
                                 def_val: *default,
                                 min_val: *min,
@@ -252,10 +243,10 @@ impl Capability for &'static SysVarCapability {
                         comment,
                         on_change,
                         VEF_VAR_STR,
-                        vef_sys_var_value_t {
-                            str_: vef_sys_var_str_t {
+                        SysVarValue {
+                            str_: SysVarStr {
                                 value_ptr,
-                                def_val: default.as_ptr().cast::<c_char>(),
+                                def_val: default.as_ptr(),
                             },
                         },
                     )
@@ -263,11 +254,11 @@ impl Capability for &'static SysVarCapability {
             };
 
             let desc = vef_sys_var_desc_t {
-                name: name.as_ptr().cast::<c_char>(),
-                comment: comment.as_ptr().cast::<c_char>(),
+                name: name.as_ptr(),
+                comment: comment.as_ptr(),
                 type_,
                 on_change: *on_change,
-                value,
+                __bindgen_anon_1: value,
             };
             let desc_ptr: *const vef_sys_var_desc_t = Box::into_raw(Box::new(desc));
             desc_ptrs.push(desc_ptr);
@@ -295,176 +286,3 @@ impl Capability for &'static SysVarCapability {
         }
     }
 }
-
-pub type vef_sys_var_get_func_t = Option<
-    unsafe extern "C" fn(
-        component_name: *const c_char,
-        name: *const c_char,
-        val: *mut *mut c_void,
-        val_len: *mut usize,
-    ) -> bool,
->;
-pub type vef_sys_var_set_func_t = Option<
-    unsafe extern "C" fn(
-        component_name: *const c_char,
-        name: *const c_char,
-        scope: *const c_char,
-        val: *const c_char,
-    ) -> bool,
->;
-// ── vef_var_type_t: which value type a sys var holds ──────────────────────────
-pub type vef_var_type_t = u32;
-pub const VEF_VAR_BOOL: vef_var_type_t = 0;
-pub const VEF_VAR_INT: vef_var_type_t = 1;
-pub const VEF_VAR_DOUBLE: vef_var_type_t = 2;
-pub const VEF_VAR_STR: vef_var_type_t = 3;
-
-// ── Union arms: one struct per value type ─────────────────────────────────────
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vef_sys_var_bool_t {
-    pub value_ptr: *mut bool,
-    pub def_val: bool,
-}
-const _: () = {
-    assert!(::std::mem::size_of::<vef_sys_var_bool_t>() == 16);
-    assert!(::std::mem::align_of::<vef_sys_var_bool_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_bool_t, value_ptr) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_bool_t, def_val) == 8);
-};
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vef_sys_var_int_t {
-    pub value_ptr: *mut i64,
-    pub def_val: i64,
-    pub min_val: i64,
-    pub max_val: i64,
-}
-const _: () = {
-    assert!(::std::mem::size_of::<vef_sys_var_int_t>() == 32);
-    assert!(::std::mem::align_of::<vef_sys_var_int_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_int_t, value_ptr) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_int_t, def_val) == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_int_t, min_val) == 16);
-    assert!(::std::mem::offset_of!(vef_sys_var_int_t, max_val) == 24);
-};
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vef_sys_var_dbl_t {
-    pub value_ptr: *mut f64,
-    pub def_val: f64,
-    pub min_val: f64,
-    pub max_val: f64,
-}
-const _: () = {
-    assert!(::std::mem::size_of::<vef_sys_var_dbl_t>() == 32);
-    assert!(::std::mem::align_of::<vef_sys_var_dbl_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_dbl_t, value_ptr) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_dbl_t, def_val) == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_dbl_t, min_val) == 16);
-    assert!(::std::mem::offset_of!(vef_sys_var_dbl_t, max_val) == 24);
-};
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vef_sys_var_str_t {
-    pub value_ptr: *mut *mut c_char,
-    pub def_val: *const c_char,
-}
-const _: () = {
-    assert!(::std::mem::size_of::<vef_sys_var_str_t>() == 16);
-    assert!(::std::mem::align_of::<vef_sys_var_str_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_str_t, value_ptr) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_str_t, def_val) == 8);
-};
-
-// ── The union: a sys var's type-specific storage. Only the arm matching
-//    `type_` is valid; reading any union field is `unsafe`. ─────────────────────
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union vef_sys_var_value_t {
-    pub boolean: vef_sys_var_bool_t,
-    pub integer: vef_sys_var_int_t,
-    pub dbl: vef_sys_var_dbl_t,
-    pub str_: vef_sys_var_str_t,
-}
-const _: () = {
-    assert!(::std::mem::size_of::<vef_sys_var_value_t>() == 32);
-    assert!(::std::mem::align_of::<vef_sys_var_value_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_value_t, boolean) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_value_t, integer) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_value_t, dbl) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_value_t, str_) == 0);
-};
-
-// ── One variable's descriptor (extension fills this in) ───────────────────────
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct vef_sys_var_desc_t {
-    pub name: *const c_char,
-    pub comment: *const c_char,
-    pub type_: vef_var_type_t,
-    pub on_change: vef_sys_var_on_change_func_t,
-    pub value: vef_sys_var_value_t,
-}
-const _: () = {
-    assert!(::std::mem::size_of::<vef_sys_var_desc_t>() == 64);
-    assert!(::std::mem::align_of::<vef_sys_var_desc_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_desc_t, name) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_desc_t, comment) == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_desc_t, type_) == 16);
-    assert!(::std::mem::offset_of!(vef_sys_var_desc_t, on_change) == 24);
-    assert!(::std::mem::offset_of!(vef_sys_var_desc_t, value) == 32);
-};
-
-// ── The list of descriptors handed to the server via capability_config ────────
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vef_sys_var_descriptor_list_t {
-    pub vars: *const *const vef_sys_var_desc_t,
-    pub var_count: u32,
-}
-const _: () = {
-    assert!(::std::mem::size_of::<vef_sys_var_descriptor_list_t>() == 16);
-    assert!(::std::mem::align_of::<vef_sys_var_descriptor_list_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_descriptor_list_t, vars) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_descriptor_list_t, var_count) == 8);
-};
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union vef_sys_var_change_value_t {
-    pub bool_val: bool,
-    pub int_val: i64,
-    pub dbl_val: f64,
-    pub str_val: *const c_char,
-}
-const _: () = {
-    assert!(::std::mem::size_of::<vef_sys_var_change_value_t>() == 8);
-    assert!(::std::mem::align_of::<vef_sys_var_change_value_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_change_value_t, bool_val) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_change_value_t, int_val) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_change_value_t, dbl_val) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_change_value_t, str_val) == 0);
-};
-
-// What the server hands your on_change callback
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct vef_sys_var_change_t {
-    pub var_name: *const c_char,
-    pub type_: vef_var_type_t,
-    pub value: vef_sys_var_change_value_t,
-}
-const _: () = {
-    assert!(::std::mem::size_of::<vef_sys_var_change_t>() == 24);
-    assert!(::std::mem::align_of::<vef_sys_var_change_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_change_t, var_name) == 0);
-    assert!(::std::mem::offset_of!(vef_sys_var_change_t, type_) == 8);
-    assert!(::std::mem::offset_of!(vef_sys_var_change_t, value) == 16);
-};
-
-/// Callback the server calls after a system variable changes. Runs on the server's thread.
-pub type vef_sys_var_on_change_func_t = Option<unsafe extern "C" fn(*const vef_sys_var_change_t)>;

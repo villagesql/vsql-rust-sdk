@@ -19,7 +19,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::ffi::{c_char, c_void, CStr};
-use villagesql::preview::sys_var::{vef_sys_var_change_t, SysVarCapability, SysVarSpec};
+use villagesql::preview::sys_var::{SysVarCapability, SysVarSpec};
+use villagesql::sys::vef_sys_var_change_t;
 use villagesql::{InValue, VdfReturn};
 
 /// Counts how many times `enabled` has changed. Bumped by the `on_change` callback.
