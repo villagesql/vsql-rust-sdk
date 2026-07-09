@@ -13,7 +13,8 @@
 
 use std::ffi::CString;
 
-use villagesql::preview::keyring::{KeyringCapability, VEF_KEYRING_OK};
+use villagesql::preview::keyring::KeyringCapability;
+use villagesql::sys::vef_keyring_result_t_VEF_KEYRING_OK as VEF_KEYRING_OK;
 use villagesql::{InValue, VdfReturn};
 
 /// The keyring capability instance, declared `static` for the extension's life.

@@ -1,69 +1,16 @@
-//! ABI definitions for the '`vsql::preview::keyring`' capability.
+//! Idiomatic wrapper for the `vsql::preview::keyring` capability.
+//! Raw ABI is generated in villagesql-sys.
 //!
 //! Based on the server header `villagesql/stable_sdk/v3/include/villagesql/
 //! abi/preview/keyring.h`.
 //! This is a preview capability. The ABI is version-gated via the 'version' field
 //! and may change in future versions.
-//! Keep this struct byte for byte compatible with the server implementation.
-
-#![allow(non_camel_case_types)]
-
-/// Capability ABI version this SDK snapshot was written against.
-pub const VEF_PREVIEW_KEYRING_ABI_VERSION: u32 = 1;
-
-/// Capability name. NUL-terminated string for FFI.
-pub const VEF_PREVIEW_KEYRING_NAME: &[u8] = b"vsql::preview::keyring\0";
-
-/// Result of a keyring read/write (only one arm valid per call).
-pub type vef_keyring_result_t = u32;
-pub const VEF_KEYRING_OK: vef_keyring_result_t = 0;
-pub const VEF_KEYRING_NOT_FOUND: vef_keyring_result_t = 1;
-pub const VEF_KEYRING_UNAVAILABLE: vef_keyring_result_t = 2;
-pub const VEF_KEYRING_ERROR: vef_keyring_result_t = 3;
-
-/// Read a secret from the keyring. Server-provided.
-pub type vef_read_keyring_fn = Option<
-    unsafe extern "C" fn(
-        data_id: *const c_char,
-        auth_id: *const c_char,
-        buf: *mut u8,
-        buf_len: usize,
-        out_len: *mut usize,
-    ) -> vef_keyring_result_t,
->;
-
-/// Write a secret to the keyring. Server-provided.
-pub type vef_write_keyring_fn = Option<
-    unsafe extern "C" fn(
-        data_id: *const c_char,
-        auth_id: *const c_char,
-        data: *const u8,
-        data_len: usize,
-    ) -> vef_keyring_result_t,
->;
-
-/// Server-provided vtable for the keyring capability
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vef_preview_keyring_t {
-    /// The version of the ABI.
-    pub version: u32,
-    /// The read function.
-    pub read: vef_read_keyring_fn,
-    /// The write function.
-    pub write: vef_write_keyring_fn,
-}
-
-/// Guard the layout against drift from the C header (64-bit alignment).
-const _: () = {
-    assert!(::std::mem::size_of::<vef_preview_keyring_t>() == 24);
-    assert!(::std::mem::align_of::<vef_preview_keyring_t>() == 8);
-    assert!(::std::mem::offset_of!(vef_preview_keyring_t, version) == 0);
-    assert!(::std::mem::offset_of!(vef_preview_keyring_t, read) == 8);
-    assert!(::std::mem::offset_of!(vef_preview_keyring_t, write) == 16);
-};
 
 use crate::preview::{Capability, RequiredCapability};
+use crate::sys::{
+    vef_keyring_result_t, vef_preview_keyring_t, VEF_PREVIEW_KEYRING_ABI_VERSION,
+    VEF_PREVIEW_KEYRING_NAME,
+};
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
