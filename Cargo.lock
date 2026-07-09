@@ -538,6 +538,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vsql_keyring"
+version = "0.1.0"
+dependencies = [
+ "villagesql",
+]
+
+[[package]]
 name = "vsql_ping"
 version = "0.1.0"
 dependencies = [

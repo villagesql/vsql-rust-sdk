@@ -1,6 +1,7 @@
 //! Preview capabilities — opt-in, versioned access to server internals.
 //! Gated server-side by `vsql_allow_preview_extensions` (default OFF).
 
+pub mod keyring;
 pub mod ping;
 
 use crate::sys::vef_required_capability_t;
