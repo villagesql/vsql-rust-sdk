@@ -6,6 +6,7 @@ members = [
     "examples/vsql_rot13",
     "examples/vsql_rational",
     "examples/vsql_ping",
+    "examples/vsql_status_var",
     "tests/sdk_coverage",
 ]
 default-members = [
