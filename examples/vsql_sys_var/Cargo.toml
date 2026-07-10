@@ -1,0 +1,13 @@
+[package]
+name = "vsql_sys_var"
+version = "0.1.0"
+edition = "2021"
+description = "Example VillageSQL extension: exercises the vsql::sys_var capability"
+license = "GPL-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+villagesql = { path = "../../villagesql" }

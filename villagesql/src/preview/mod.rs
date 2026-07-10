@@ -2,6 +2,7 @@
 //! Gated server-side by `vsql_allow_preview_extensions` (default OFF).
 
 pub mod ping;
+pub mod sys_var;
 
 use crate::sys::vef_required_capability_t;
 use std::ffi::{c_char, c_void};
