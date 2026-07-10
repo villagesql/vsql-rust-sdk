@@ -3,6 +3,7 @@
 
 pub mod ping;
 pub mod sys_var;
+pub mod thread_worker;
 
 use crate::sys::vef_required_capability_t;
 use std::ffi::{c_char, c_void};

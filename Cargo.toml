@@ -8,6 +8,7 @@ members = [
     "examples/vsql_ping",
     "examples/vsql_sys_var",
     "tests/sdk_coverage",
+    "examples/vsql_thread_worker",
 ]
 default-members = [
     "villagesql-sys",
