@@ -1,0 +1,27 @@
+# Tests the vsql::preview::thread_worker capability. Turning the control sys var
+# ON starts a background thread that ticks a counter every 100ms; ticks() reads
+# it. Proves the server ran our work_fn on its own thread via the trampoline.
+
+SET PERSIST vsql_allow_preview_extensions = ON;
+
+INSTALL EXTENSION vsql_thread_worker;
+
+--echo # Before enabling, the worker has not ticked
+SELECT vsql_thread_worker.ticks() AS before_enable;
+
+--echo # Enable the worker; it starts ticking in the background
+SET GLOBAL vsql_thread_worker.ticker_enabled = ON;
+
+# Poll (don't fixed-sleep) until the worker has ticked at least once.
+let $wait_condition = SELECT vsql_thread_worker.ticks() > 0;
+--source include/wait_condition.inc
+
+--echo # The worker ran on its own thread — counter advanced past zero
+SELECT vsql_thread_worker.ticks() > 0 AS ticked;
+
+SET GLOBAL vsql_thread_worker.ticker_enabled = OFF;
+
+UNINSTALL EXTENSION vsql_thread_worker;
+
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

@@ -4,6 +4,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../include/villagesql/abi/preview/sys_var.h");
     println!("cargo:rerun-if-changed=../include/villagesql/abi/preview/status_var.h");
     println!("cargo:rerun-if-changed=../include/villagesql/abi/preview/keyring.h");
+    println!("cargo:rerun-if-changed=../include/villagesql/abi/preview/thread_worker.h");
 
     #[cfg(feature = "regenerate-bindings")]
     regenerate();
@@ -27,6 +28,10 @@ fn regenerate() {
             "preview/status_var.rs",
         ),
         ("villagesql/abi/preview/keyring.h", "preview/keyring.rs"),
+        (
+            "villagesql/abi/preview/thread_worker.h",
+            "preview/thread_worker.rs",
+        ),
     ];
 
     for (header, out_file) in headers {
