@@ -3,7 +3,29 @@
 # proves the Rust write/read accessors reach the server's keyring vtable.
 
 --source include/have_component_keyring_file.inc
---source suite/component_keyring_file/inc/setup_component.inc
+
+# --- setup: load component_keyring_file (inlined from the dev_server-stripped
+# --- suite/component_keyring_file/inc/setup_component.inc) ---
+--echo # ----------------------------------------------------------------------
+--echo # Setup
+
+--let PLUGIN_DIR_OPT = $KEYRING_FILE_COMPONENT_OPT
+
+--let CURRENT_DATADIR = `SELECT @@datadir`
+
+--let COMPONENT_LIBRARY = `SELECT SUBSTRING_INDEX('$KEYRING_FILE_COMPONENT_LOAD', '=', -1)`
+--let COMPONENT_DIR = $KEYRING_FILE_COMPONENT_DIR
+--let COMPONENT_NAME = `SELECT SUBSTRING_INDEX('$COMPONENT_LIBRARY', '.', 1)`
+
+--let KEYRING_FILE_PATH = `SELECT CONCAT( '$MYSQLTEST_VARDIR', '/keyring_file')`
+--let KEYRING_CONFIG_CONTENT = `SELECT CONCAT('{ \"path\": \"', '$KEYRING_FILE_PATH','\", \"read_only\": false }')`
+--source include/keyring_tests/helper/local_keyring_create_config.inc
+
+--let LOCAL_MANIFEST_CONTENT = `SELECT CONCAT('{ \"components\": \"file://', '$COMPONENT_NAME', '\" }')`
+--source include/keyring_tests/helper/instance_create_manifest.inc
+
+--source include/keyring_tests/helper/start_server_with_manifest.inc
+--echo # ----------------------------------------------------------------------
 
 SET PERSIST vsql_allow_preview_extensions = ON;
 
@@ -24,4 +46,12 @@ UNINSTALL EXTENSION vsql_keyring;
 SET PERSIST vsql_allow_preview_extensions = OFF;
 RESET PERSIST vsql_allow_preview_extensions;
 
---source suite/component_keyring_file/inc/teardown_component.inc
+# --- teardown: inlined from the dev_server-stripped
+# --- suite/component_keyring_file/inc/teardown_component.inc ---
+--echo # ----------------------------------------------------------------------
+--echo # Teardown
+--source include/keyring_tests/helper/instance_remove_manifest.inc
+--source include/keyring_tests/helper/local_keyring_file_remove.inc
+--source include/keyring_tests/helper/local_keyring_remove_config.inc
+--source include/keyring_tests/helper/cleanup_server_with_manifest.inc
+--echo # ----------------------------------------------------------------------

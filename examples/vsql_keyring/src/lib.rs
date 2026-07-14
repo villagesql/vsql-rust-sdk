@@ -14,7 +14,6 @@
 use std::ffi::CString;
 
 use villagesql::preview::keyring::KeyringCapability;
-use villagesql::sys::vef_keyring_result_t_VEF_KEYRING_OK as VEF_KEYRING_OK;
 use villagesql::{InValue, VdfReturn};
 
 /// The keyring capability instance, declared `static` for the extension's life.
@@ -39,25 +38,21 @@ fn arg_cstr(arg: Option<&InValue>) -> Option<CString> {
 
 /// SQL: `vsql_keyring.keyring_store(data_id, auth_id, value)` -> INT
 ///
-/// Writes `value` to the keyring under `data_id`. Returns the keyring result code
-/// (0 = `VEF_KEYRING_OK`), or NULL if `data_id`/`value` is missing or the
-/// capability is unavailable.
+/// Writes `value` to the keyring under `data_id`. Returns 0 on success, or NULL
+/// if `data_id`/`value` is missing or the write fails (capability unavailable,
+/// no keyring component, or another error).
 fn keyring_store_impl(args: &[InValue]) -> VdfReturn {
     let Some(data_id) = arg_cstr(args.first()) else {
         return VdfReturn::null();
     };
     let auth_id = arg_cstr(args.get(1));
-    let auth_ptr = auth_id.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
     let Some(&InValue::String(value)) = args.get(2) else {
         return VdfReturn::null();
     };
 
-    // SAFETY: data_id/auth (or null) are valid NUL-terminated C strings; value
-    // points to `value.len()` readable bytes — all valid for the call.
-    let result = unsafe { KEYRING.write(data_id.as_ptr(), auth_ptr, value.as_ptr(), value.len()) };
-    match result {
-        Some(r) => VdfReturn::int(i64::from(r)),
-        None => VdfReturn::null(),
+    match KEYRING.write(&data_id, auth_id.as_deref(), value.as_bytes()) {
+        Ok(()) => VdfReturn::int(0),
+        Err(_) => VdfReturn::null(),
     }
 }
 
@@ -71,31 +66,14 @@ fn keyring_read_impl(args: &[InValue]) -> VdfReturn {
         return VdfReturn::null();
     };
     let auth_id = arg_cstr(args.get(1));
-    let auth_ptr = auth_id.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
 
     let mut buf = [0u8; MAX_SECRET_LEN];
-    let mut out_len: usize = 0;
-    // SAFETY: data_id/auth (or null) are valid NUL-terminated C strings; buf is a
-    // writable 1024-byte buffer and out_len a valid writable pointer — all valid
-    // for the call.
-    let result = unsafe {
-        KEYRING.read(
-            data_id.as_ptr(),
-            auth_ptr,
-            buf.as_mut_ptr(),
-            buf.len(),
-            &raw mut out_len,
-        )
-    };
-    match result {
-        Some(r) if r == VEF_KEYRING_OK => {
-            let n = out_len.min(buf.len());
-            match std::str::from_utf8(&buf[..n]) {
-                Ok(s) => VdfReturn::string(s),
-                Err(_) => VdfReturn::null(),
-            }
-        }
-        _ => VdfReturn::null(),
+    match KEYRING.read(&data_id, auth_id.as_deref(), &mut buf) {
+        Ok(Some(n)) => match std::str::from_utf8(&buf[..n]) {
+            Ok(s) => VdfReturn::string(s),
+            Err(_) => VdfReturn::null(),
+        },
+        Ok(None) | Err(_) => VdfReturn::null(),
     }
 }
 

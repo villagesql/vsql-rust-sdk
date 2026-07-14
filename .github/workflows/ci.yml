@@ -124,6 +124,8 @@ jobs:
             dir: examples/vsql_rational
           - name: sdk_coverage
             dir: tests/sdk_coverage
+          - name: vsql_keyring
+            dir: examples/vsql_keyring
 
     steps:
       - name: Checkout
