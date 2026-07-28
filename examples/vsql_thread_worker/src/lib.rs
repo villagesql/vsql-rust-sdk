@@ -1,8 +1,9 @@
-//! Example VillageSQL extension exercising the `vsql::preview::thread_worker`
+//! Example `VillageSQL` extension exercising the `vsql::preview::thread_worker`
 //! capability. A background worker ticks a counter every 100ms while its control
 //! sys var is ON; `vsql_thread_worker.ticks()` reads the counter.
 
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 
 use villagesql::preview::thread_worker::{
     NextWakeup, ThreadHandle, ThreadWorkerCapability, WakeupReason,
@@ -21,7 +22,8 @@ fn worker(reason: WakeupReason, _handle: ThreadHandle) -> NextWakeup {
 }
 
 /// Run `worker`, control-var suffix "ticker", tick every 100ms, default var name.
-static WORKER: ThreadWorkerCapability = ThreadWorkerCapability::new(worker, c"ticker", 100, None);
+static WORKER: ThreadWorkerCapability =
+    ThreadWorkerCapability::new(worker, c"ticker", Duration::from_millis(100), None);
 
 /// SQL: `vsql_thread_worker.ticks()` -> INT - how many times the worker has ticked.
 fn ticks_impl(_args: &[InValue]) -> VdfReturn {
