@@ -202,7 +202,9 @@ pub fn tvector_to_strings(p: &TvectorParams) -> Vec<(String, String)> {
 
 pub fn tvector_int_to_params(n: i64) -> Result<String, String> {
     if !(1..=4096).contains(&n) {
-        return Err(format!("tvector: dimension must be in 1..=4096, got {n}"));
+        return Err(format!(
+            "tvector: dimension must be in the range [1, 4096], got {n}"
+        ));
     }
     Ok(format!("dimension={n}"))
 }
@@ -215,7 +217,7 @@ pub fn tvector_resolve_params(params: Params) -> Result<Resolved, String> {
         .map_err(|e| format!("tvector: bad dimension: {e}"))?;
     if !(1..=4096).contains(&dimension) {
         return Err(format!(
-            "tvector: dimension must be in 1..=4096, got {dimension}"
+            "tvector: dimension must be in the range [1, 4096], got {dimension}"
         ));
     }
 

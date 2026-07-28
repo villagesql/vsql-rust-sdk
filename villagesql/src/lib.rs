@@ -86,17 +86,20 @@ impl Type {
 /// A single input value delivered to a VDF for one row.
 ///
 /// Always check for [`InValue::Null`] before attempting to read the inner value.
-/// For custom types the binary persisted bytes and type parameters are exposed as
-/// [`InValue::Custom`].
+/// For custom types the binary persisted bytes are exposed as
+/// [`InValue::Custom`]. If it's a custom type with parameters, then the binary
+/// persisted bytes and parameters are exposed as [`InValue::CustomWithParams`].
 #[derive(Debug)]
 pub enum InValue<'a> {
     Null,
     String(&'a str),
     Real(f64),
     Int(i64),
+    /// A custom-type argument: just its raw persisted bytes.
+    Custom(&'a [u8]),
     /// A custom-type argument: its raw persisted bytes plus the type parameters
-    /// the column was declared with (empty for non-parameterized types).
-    Custom {
+    /// the column was declared with.
+    CustomWithParams {
         bytes: &'a [u8],
         params: TypeParams<'a>,
     },
@@ -528,7 +531,11 @@ pub unsafe fn dispatch_vdf(
                 let params = TypeParams {
                     raw: &anon.type_params,
                 };
-                InValue::Custom { bytes, params }
+                if params.is_empty() {
+                    InValue::Custom(bytes)
+                } else {
+                    InValue::CustomWithParams { bytes, params }
+                }
             }
             _ => InValue::Null,
         };
@@ -1056,7 +1063,7 @@ macro_rules! __vsql_type_vdfs {
         $(,)?
     ) => {{
         $crate::paste::paste! {
-            // ── TYPE::from_string(STRING) -> CUSTOM ──────────────────────────
+            // TYPE::from_string(STRING) -> CUSTOM
             fn [< __vsql_from_string_vdf_ $enc_fn >](
                 args: &[$crate::InValue],
             ) -> $crate::VdfReturn {
@@ -1081,12 +1088,12 @@ macro_rules! __vsql_type_vdfs {
             static [< __VSQL_FROM_STRING_PARAMS_ $enc_fn:upper >]: &[$crate::Type] =
                 &[$crate::Type::String];
 
-            // ── TYPE::to_string(CUSTOM) -> STRING ────────────────────────────
+            // TYPE::to_string(CUSTOM) -> STRING
             fn [< __vsql_to_string_vdf_ $dec_fn >](
                 args: &[$crate::InValue],
             ) -> $crate::VdfReturn {
                 match args.get(0) {
-                    Some($crate::InValue::Custom{ bytes: b, .. }) => match $dec_fn(b) {
+                    Some($crate::InValue::Custom(b)) => match $dec_fn(b) {
                         Ok(s) => $crate::VdfReturn::String(s),
                         Err(e) => $crate::VdfReturn::error(e),
                     },
@@ -1106,12 +1113,12 @@ macro_rules! __vsql_type_vdfs {
             static [< __VSQL_TO_STRING_PARAMS_ $dec_fn:upper >]: &[$crate::Type] =
                 &[$crate::custom!($type_name)];
 
-            // ── TYPE::compare(CUSTOM, CUSTOM) -> INT ─────────────────────────
+            // TYPE::compare(CUSTOM, CUSTOM) -> INT
             fn [< __vsql_compare_vdf_ $cmp_fn >](
                 args: &[$crate::InValue],
             ) -> $crate::VdfReturn {
                 match (args.get(0), args.get(1)) {
-                    (Some($crate::InValue::Custom{ bytes: a, .. }), Some($crate::InValue::Custom{ bytes: b, .. })) => {
+                    (Some($crate::InValue::Custom(a)), Some($crate::InValue::Custom(b))) => {
                         $crate::VdfReturn::Int(match $cmp_fn(a, b) {
                             ::std::cmp::Ordering::Less => -1,
                             ::std::cmp::Ordering::Equal => 0,
@@ -1133,13 +1140,13 @@ macro_rules! __vsql_type_vdfs {
                 $crate::custom!($type_name),
             ];
 
-            // ── TYPE::hash(CUSTOM) -> INT (optional) ──
+            // TYPE::hash(CUSTOM) -> INT (optional)
             $(
                 fn [< __vsql_hash_vdf_ $hash_fn >](
                     args: &[$crate::InValue],
                 ) -> $crate::VdfReturn {
                     match args.get(0) {
-                        Some($crate::InValue::Custom{ bytes: b, .. }) => {
+                        Some($crate::InValue::Custom(b)) => {
                             $crate::VdfReturn::Int($hash_fn(b) as i64)
                         }
                         Some($crate::InValue::Null) | None => $crate::VdfReturn::null(),
@@ -1159,7 +1166,7 @@ macro_rules! __vsql_type_vdfs {
                     &[$crate::custom!($type_name)];
             )?
 
-            // ── Register them, evaluate to the Vec ───────────────────────────
+            // Register them, evaluate to the Vec
             #[allow(unused_mut)]
             let mut __embedded: ::std::vec::Vec<$crate::FuncDescriptor> =
                 ::std::vec::Vec::new();
@@ -1234,7 +1241,7 @@ macro_rules! __vsql_type_vdfs_typed {
             static [< __VSQL_PARAMS_CACHE_$dec_fn:upper >]:
                 $crate::TypeParamsCache<$p_ty> = $crate::TypeParamsCache::new();
 
-            // ── TYPE::from_string(STRING) -> CUSTOM (typed; may infer params) -
+            // TYPE::from_string(STRING) -> CUSTOM (typed; may infer params)
             unsafe extern "C" fn [< __vsql_trampoline_from_string_ $enc_fn >] (
                 _ctx: *mut $crate::sys::vef_context_t,
                 args: *mut $crate::sys::vef_vdf_args_t,
@@ -1247,12 +1254,12 @@ macro_rules! __vsql_type_vdfs_typed {
             static [< __VSQL_FROM_STRING_PARAMS_ $enc_fn:upper >]: &[$crate::Type] =
                 &[$crate::Type::String];
 
-            // ── TYPE::to_string(CUSTOM) -> STRING (typed) ────────────────────
+            // TYPE::to_string(CUSTOM) -> STRING (typed)
             fn [< __vsql_to_string_vdf_ $dec_fn >](
                 args: &[$crate::InValue],
             ) -> $crate::VdfReturn {
                 match args.get(0) {
-                    Some($crate::InValue::Custom{ bytes: b, params: tp }) => {
+                    Some($crate::InValue::CustomWithParams{ bytes: b, params: tp }) => {
                         let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, $parse_fn);
                         match $dec_fn(b, p) {
                             Ok(s) => $crate::VdfReturn::String(s),
@@ -1275,14 +1282,14 @@ macro_rules! __vsql_type_vdfs_typed {
             static [< __VSQL_TO_STRING_PARAMS_ $dec_fn:upper >]: &[$crate::Type] =
                 &[$crate::custom!($type_name)];
 
-            // ── TYPE::compare(CUSTOM, CUSTOM) -> INT (typed) ─────────────────
+            // TYPE::compare(CUSTOM, CUSTOM) -> INT (typed)
             fn [< __vsql_compare_vdf_ $cmp_fn >](
                 args: &[$crate::InValue],
             ) -> $crate::VdfReturn {
                 match (args.get(0), args.get(1)) {
                     (
-                        Some($crate::InValue::Custom{ bytes: a, params: tp }),
-                        Some($crate::InValue::Custom{ bytes: b, .. }),
+                        Some($crate::InValue::CustomWithParams{ bytes: a, params: tp }),
+                        Some($crate::InValue::CustomWithParams{ bytes: b, .. }),
                     ) => {
                         let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, $parse_fn);
                         $crate::VdfReturn::Int(match $cmp_fn(a, b, p) {
@@ -1306,13 +1313,13 @@ macro_rules! __vsql_type_vdfs_typed {
                 $crate::custom!($type_name),
             ];
 
-            // ── TYPE::hash(CUSTOM) -> INT (optional, typed) ──────────────────
+            // TYPE::hash(CUSTOM) -> INT (optional, typed)
             $(
                 fn [< __vsql_hash_vdf_ $hash_fn >](
                     args: &[$crate::InValue],
                 ) -> $crate::VdfReturn {
                     match args.get(0) {
-                        Some($crate::InValue::Custom{ bytes: b, params: tp }) => {
+                        Some($crate::InValue::CustomWithParams{ bytes: b, params: tp }) => {
                             let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, $parse_fn);
                             $crate::VdfReturn::Int($hash_fn(b, p) as i64)
                         }
@@ -1333,7 +1340,7 @@ macro_rules! __vsql_type_vdfs_typed {
                     &[$crate::custom!($type_name)];
             )?
 
-            // ── TYPE::int_to_params(INT) -> STRING ───────────────────────────
+            // TYPE::int_to_params(INT) -> STRING
             fn [< __vsql_int_to_params_vdf_ $i2p_fn >](
                 args: &[$crate::InValue],
             ) -> $crate::VdfReturn {
@@ -1358,7 +1365,7 @@ macro_rules! __vsql_type_vdfs_typed {
             static [< __VSQL_INT_TO_PARAMS_PARAMS_ $i2p_fn:upper >]: &[$crate::Type] =
                 &[$crate::Type::Int];
 
-            // ── TYPE::resolve_params(STRING) -> STRING ───────────────────────
+            // TYPE::resolve_params(STRING) -> STRING
             fn [< __vsql_resolve_params_vdf_ $rp_fn >](
                 args: &[$crate::InValue],
             ) -> $crate::VdfReturn {
@@ -1385,7 +1392,7 @@ macro_rules! __vsql_type_vdfs_typed {
             static [< __VSQL_RESOLVE_PARAMS_PARAMS_ $rp_fn:upper >]: &[$crate::Type] =
                 &[$crate::Type::String];
 
-            // ── TYPE::intrinsic_default() -> STRING (optional) ───────────────
+            // TYPE::intrinsic_default() -> STRING (optional)
             $(
                 unsafe extern "C" fn [< __vsql_trampoline_intrinsic_default_ $default_fn >](
                     _ctx: *mut $crate::sys::vef_context_t,
@@ -1397,7 +1404,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 static [< __VSQL_INTRINSIC_DEFAULT_PARAMS_ $default_fn:upper >]: &[$crate::Type] = &[];
             )?
 
-            // ── Register them, evaluate to the Vec ───────────────────────────
+            // Register them, evaluate to the Vec
             #[allow(unused_mut)]
             let mut __embedded: ::std::vec::Vec<$crate::FuncDescriptor> =
                 ::std::vec::Vec::new();

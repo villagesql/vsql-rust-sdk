@@ -199,8 +199,17 @@ SELECT tvector::compare(tvector::from_string('[1,2]'), tvector::from_string('[1,
 ERROR HY000: Cannot initialize function 'tvector::compare': conflicting type parameters for sdk_coverage.tvector in arguments 1 and 2
 # Error: dimension over the 4096 cap is rejected at declaration
 CREATE TABLE tv_big (id INT, v sdk_coverage.tvector(5000));
-ERROR 42000: tvector: dimension must be in 1..=4096, got 5000 near 'sdk_coverage.tvector(5000))' at line 1
+ERROR 42000: tvector: dimension must be in the range [1, 4096], got 5000 near 'sdk_coverage.tvector(5000))' at line 1
 # Error: a malformed vector literal fails at fix_fields (bad element)
 SELECT tvector::from_string('[abc,2,3]');
 ERROR HY000: error encountered during tvector::from_string inference: tvector: bad element: invalid float literal
+# Error: bad values into resolve_params produce clean VDF errors
+SELECT padint::resolve_params('width=abc');
+ERROR HY000: VDF error in function 'padint::resolve_params': padint: bad width: invalid digit found in string
+SELECT tvector::resolve_params('dimension=0');
+ERROR HY000: VDF error in function 'tvector::resolve_params': tvector: dimension must be in the range [1, 4096], got 0
+SELECT tvector::resolve_params('dimension=abc');
+ERROR HY000: VDF error in function 'tvector::resolve_params': tvector: bad dimension: invalid digit found in string
+SELECT tvector::resolve_params('dimension=3,type=int');
+ERROR HY000: VDF error in function 'tvector::resolve_params': tvector: type must be 'float' or 'double', got "int"
 UNINSTALL EXTENSION sdk_coverage;

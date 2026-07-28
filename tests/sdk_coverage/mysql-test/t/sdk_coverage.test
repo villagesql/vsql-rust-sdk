@@ -129,4 +129,14 @@ CREATE TABLE tv_big (id INT, v sdk_coverage.tvector(5000));
 --error ER_VILLAGESQL_GENERIC_ERROR
 SELECT tvector::from_string('[abc,2,3]');
 
+--echo # Error: bad values into resolve_params produce clean VDF errors
+--error ER_UDF_ERROR
+SELECT padint::resolve_params('width=abc');
+--error ER_UDF_ERROR
+SELECT tvector::resolve_params('dimension=0');
+--error ER_UDF_ERROR
+SELECT tvector::resolve_params('dimension=abc');
+--error ER_UDF_ERROR
+SELECT tvector::resolve_params('dimension=3,type=int');
+
 UNINSTALL EXTENSION sdk_coverage;
