@@ -110,9 +110,11 @@ pub fn rational_hash(b: &[u8]) -> usize {
 
 fn arg(args: &[InValue], pos: usize) -> Result<Option<(i64, i64)>, String> {
     match args.get(pos) {
-        Some(InValue::Custom(b)) if b.len() >= BYTES => Ok(Some(from_bytes(b))),
+        Some(InValue::Custom { bytes: b, .. }) if b.len() >= BYTES => Ok(Some(from_bytes(b))),
         Some(InValue::Null) | None => Ok(None),
-        Some(InValue::Custom(b)) => Err(format!("expected {} bytes, got {}", BYTES, b.len())),
+        Some(InValue::Custom { bytes: b, .. }) => {
+            Err(format!("expected {} bytes, got {}", BYTES, b.len()))
+        }
         _ => Err("expected a rational argument".into()),
     }
 }
