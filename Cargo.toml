@@ -7,6 +7,7 @@ members = [
     "examples/vsql_rational",
     "examples/vsql_ping",
     "examples/vsql_status_var",
+    "examples/vsql_sys_var",
     "tests/sdk_coverage",
 ]
 default-members = [
@@ -16,6 +17,7 @@ default-members = [
     "examples/vsql_rot13",
     "examples/vsql_rational",
     "examples/vsql_ping",
+    "examples/vsql_sys_var",
     "tests/sdk_coverage",
 ]
 resolver = "2"
