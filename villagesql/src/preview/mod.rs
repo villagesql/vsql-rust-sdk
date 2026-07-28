@@ -3,6 +3,8 @@
 
 pub mod keyring;
 pub mod ping;
+pub mod status_var;
+pub mod sys_var;
 
 use crate::sys::vef_required_capability_t;
 use std::ffi::{c_char, c_void};
