@@ -2,8 +2,6 @@
 # Requires the keyring_file component. Storing a secret and reading it back
 # proves the Rust write/read accessors reach the server's keyring vtable.
 
---source include/have_component_keyring_file.inc
-
 # --- setup: load component_keyring_file (inlined from the dev_server-stripped
 # --- suite/component_keyring_file/inc/setup_component.inc) ---
 --echo # ----------------------------------------------------------------------
