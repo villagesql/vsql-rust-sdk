@@ -23,7 +23,7 @@ fn worker(reason: WakeupReason, _handle: ThreadHandle) -> NextWakeup {
 
 /// Run `worker`, control-var suffix "ticker", tick every 100ms, default var name.
 static WORKER: ThreadWorkerCapability =
-    ThreadWorkerCapability::new(worker, c"ticker", Duration::from_millis(100), None);
+    ThreadWorkerCapability::new(worker, "ticker", Duration::from_millis(100), None);
 
 /// SQL: `vsql_thread_worker.ticks()` -> INT - how many times the worker has ticked.
 fn ticks_impl(_args: &[InValue]) -> VdfReturn {

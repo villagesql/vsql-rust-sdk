@@ -5,7 +5,7 @@
 //! abi/preview/thread_worker.h`.
 //! This is a preview capability; its ABI may change or be removed in future versions.
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_char, c_void, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::AtomicPtr;
 use std::time::Duration;
@@ -44,7 +44,7 @@ pub enum WakeupReason {
 /// What your worker returns: when to wake next, and which fd to watch.
 #[derive(Debug, Clone, Copy)]
 pub struct NextWakeup {
-    /// When to wake next. `None` = keep the current interval unchanged.
+    /// When to wake next. `None` = keep the current sleep interval unchanged.
     /// A zero-length `Duration` also collapses to "no change": the C ABI
     /// reserves `0` for that, so an instant wakeup can't be expressed.
     pub sleep_interval: Option<Duration>,
@@ -94,8 +94,8 @@ pub struct ThreadWorkerCapability {
     abi_: AtomicPtr<vef_preview_thread_worker_t>,
     work_fn: WorkFn,
     sleep_interval: Duration,
-    suffix: &'static CStr,
-    var_name: Option<&'static CStr>,
+    suffix: &'static str,
+    var_name: Option<&'static str>,
 }
 
 const _: () = {
@@ -109,9 +109,9 @@ impl ThreadWorkerCapability {
     #[must_use]
     pub const fn new(
         work_fn: WorkFn,
-        suffix: &'static CStr,
+        suffix: &'static str,
         sleep_interval: Duration,
-        var_name: Option<&'static CStr>,
+        var_name: Option<&'static str>,
     ) -> Self {
         Self {
             abi_: AtomicPtr::new(std::ptr::null_mut()),
@@ -125,6 +125,20 @@ impl ThreadWorkerCapability {
 
 impl Capability for &'static ThreadWorkerCapability {
     fn request(self) -> RequiredCapability {
+        // Turn the &str fields into the null-terminated C strings the server
+        // needs. into_raw() leaks each on purpose. The server holds these for
+        // the extension's lifetime. CString::new only fails on an interior
+        // NUL byte, which would be an author mistake.
+        let suffix_ptr: *const c_char = CString::new(self.suffix)
+            .expect("thread_worker suffix must not contain a NUL byte")
+            .into_raw();
+        let var_name_ptr: *const c_char = match self.var_name {
+            Some(name) => CString::new(name)
+                .expect("thread_worker var_name must not contain a NUL byte")
+                .into_raw(),
+            None => std::ptr::null(),
+        };
+
         // Leaked with Box::into_raw: the server keeps the descriptor
         // (capability_config) for the extension's lifetime.
         let descriptor = vef_thread_worker_descriptor_t {
@@ -134,9 +148,9 @@ impl Capability for &'static ThreadWorkerCapability {
             // recovers to reach work_fn.
             arg: std::ptr::from_ref(self).cast::<c_void>().cast_mut(),
             sleep_ms: duration_to_ms(self.sleep_interval),
-            suffix: self.suffix.as_ptr(),
+            suffix: suffix_ptr,
             // Option<&CStr> -> pointer, or null when None (server uses the default name).
-            var_name: self.var_name.map_or(std::ptr::null(), CStr::as_ptr),
+            var_name: var_name_ptr,
         };
         let descriptor_ptr: *const vef_thread_worker_descriptor_t =
             Box::into_raw(Box::new(descriptor));
