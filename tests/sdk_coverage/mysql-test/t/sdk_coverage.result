@@ -97,4 +97,119 @@ SELECT id, c, f FROM t2;
 id	c	f
 1	NULL	NULL
 DROP TABLE t2;
+# Type: padint (parameterized) - the two param VDFs
+# int_to_params: SQL type modifier -> canonical params string
+SELECT padint::int_to_params(5);
+padint::int_to_params(5)
+width=5
+SELECT padint::int_to_params(12);
+padint::int_to_params(12)
+width=12
+SELECT padint::int_to_params(0);
+ERROR HY000: VDF error in function 'padint::int_to_params': padint: width must be >= 1, got 0
+# resolve_params: params string -> "persisted_length,max_decode_buffer_length"
+SELECT padint::resolve_params('width=5');
+padint::resolve_params('width=5')
+8,20
+SELECT padint::resolve_params('width=12');
+padint::resolve_params('width=12')
+8,20
+SELECT padint::resolve_params('');
+ERROR HY000: VDF error in function 'padint::resolve_params': padint: missing 'width' param
+# padint value round-trip (per-row VDFs, param-independent)
+SELECT padint::from_string('42');
+padint::from_string('42')
+42
+# parameterized columns with DIFFERENT widths: the typed params cache
+# parses/stores width=5 and width=3 separately; decode pads to each
+CREATE TABLE t3 (
+id INT, 
+p5 sdk_coverage.padint(5),
+p3 sdk_coverage.padint(3)
+);
+INSERT INTO t3 VALUES (1, '7', '7'), (2, '100', '100'), (3, '42', '42');
+SELECT id, p5, p3 FROM t3 ORDER BY id;
+id	p5	p3
+1	00007	007
+2	00100	100
+3	00042	042
+# ORDER BY the custom column exercises compare with the column's known params
+SELECT id, p5 FROM t3 ORDER BY p5;
+id	p5
+1	00007
+3	00042
+2	00100
+DROP TABLE t3;
+# Inference: bare constants now infer their own params (width = digit
+# count), so compare works.
+SELECT padint::compare(padint::from_string('1'), padint::from_string('2'));
+padint::compare(padint::from_string('1'), padint::from_string('2'))
+-1
+SELECT padint::compare(padint::from_string('7'), padint::from_string('7'));
+padint::compare(padint::from_string('7'), padint::from_string('7'))
+0
+# Typed hash: hash on a parameterized value gets &PadintParams via the cache
+SELECT padint::hash(padint::from_string('42'));
+padint::hash(padint::from_string('42'))
+42
+# Param-conflict rule: a bare '1' infers width=1 and '100' infers width=3,
+# so their params conflict and compare must be rejected.
+SELECT padint::compare(padint::from_string('1'), padint::from_string('100'));
+ERROR HY000: Cannot initialize function 'padint::compare': conflicting type parameters for sdk_coverage.padint in arguments 1 and 2
+# Type: tvector (parameterized, fixed-length, param-dependent storage)
+# int_to_params: TVECTOR(N) -> dimension=N
+SELECT tvector::int_to_params(3);
+tvector::int_to_params(3)
+dimension=3
+# resolve_params is mutating: fills type=float and returns
+# persisted_length,max_decode_buffer_length,<byte-len>,<rewritten params>
+SELECT tvector::resolve_params('dimension=3');
+tvector::resolve_params('dimension=3')
+12,48,22,dimension=3,type=float
+SELECT tvector::resolve_params('dimension=4,type=double');
+tvector::resolve_params('dimension=4,type=double')
+32,128,23,dimension=4,type=double
+# Parameterized column: tvector(3) runs int_to_params(3) then resolve params.
+# storage = dimension * 4 bytes (float default filled by resolve_params)
+CREATE TABLE tv (id INT, v sdk_coverage.tvector(3));
+INSERT INTO tv VALUES (1, '[1,2,3]'), (2, '[4,5,6]');
+SELECT id, v FROM tv ORDER BY id;
+id	v
+1	[1,2,3]
+2	[4,5,6]
+# ORDER BY exercises compare with the column's params
+SELECT id, v FROM tv ORDER BY v;
+id	v
+1	[1,2,3]
+2	[4,5,6]
+DROP TABLE tv;
+# A double-precision tvector column
+CREATE TABLE tvd (id INT, v sdk_coverage.tvector('dimension=2,type=double'));
+INSERT INTO tvd VALUES (1, '[1.5,2.5]');
+SELECT id, v FROM tvd;
+id	v
+1	[1.5,2.5]
+DROP TABLE tvd;
+# Inference: bare '[1,2,3]' infers dimension=3, so compare works
+SELECT tvector::compare(tvector::from_string('[1,2,3]'), tvector::from_string('[4,5,6]'));
+tvector::compare(tvector::from_string('[1,2,3]'), tvector::from_string('[4,5,6]'))
+-1
+# Conflicting inferred dimensions (2 vs 3) are rejected
+SELECT tvector::compare(tvector::from_string('[1,2]'), tvector::from_string('[1,2,3]'));
+ERROR HY000: Cannot initialize function 'tvector::compare': conflicting type parameters for sdk_coverage.tvector in arguments 1 and 2
+# Error: dimension over the 4096 cap is rejected at declaration
+CREATE TABLE tv_big (id INT, v sdk_coverage.tvector(5000));
+ERROR 42000: tvector: dimension must be in the range [1, 4096], got 5000 near 'sdk_coverage.tvector(5000))' at line 1
+# Error: a malformed vector literal fails at fix_fields (bad element)
+SELECT tvector::from_string('[abc,2,3]');
+ERROR HY000: error encountered during tvector::from_string inference: tvector: bad element: invalid float literal
+# Error: bad values into resolve_params produce clean VDF errors
+SELECT padint::resolve_params('width=abc');
+ERROR HY000: VDF error in function 'padint::resolve_params': padint: bad width: invalid digit found in string
+SELECT tvector::resolve_params('dimension=0');
+ERROR HY000: VDF error in function 'tvector::resolve_params': tvector: dimension must be in the range [1, 4096], got 0
+SELECT tvector::resolve_params('dimension=abc');
+ERROR HY000: VDF error in function 'tvector::resolve_params': tvector: bad dimension: invalid digit found in string
+SELECT tvector::resolve_params('dimension=3,type=int');
+ERROR HY000: VDF error in function 'tvector::resolve_params': tvector: type must be 'float' or 'double', got "int"
 UNINSTALL EXTENSION sdk_coverage;
