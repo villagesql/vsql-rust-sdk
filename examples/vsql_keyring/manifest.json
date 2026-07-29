@@ -1,0 +1,7 @@
+{
+  "name": "vsql_keyring",
+  "version": "0.1.0",
+  "description": "Example VillageSQL extension: exercises the vsql::preview::keyring capability",
+  "author": "VillageSQL Community",
+  "license": "GPL-2.0"
+}
