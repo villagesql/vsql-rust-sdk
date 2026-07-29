@@ -49,4 +49,94 @@ INSERT INTO t2 (id) VALUES (1);
 SELECT id, c, f FROM t2;
 DROP TABLE t2;
 
+--echo # Type: padint (parameterized) - the two param VDFs
+--echo # int_to_params: SQL type modifier -> canonical params string
+SELECT padint::int_to_params(5);
+SELECT padint::int_to_params(12);
+--error ER_UDF_ERROR
+SELECT padint::int_to_params(0);
+
+--echo # resolve_params: params string -> "persisted_length,max_decode_buffer_length"
+SELECT padint::resolve_params('width=5');
+SELECT padint::resolve_params('width=12');
+--error ER_UDF_ERROR
+SELECT padint::resolve_params('');
+
+--echo # padint value round-trip (per-row VDFs, param-independent)
+SELECT padint::from_string('42');
+
+--echo # parameterized columns with DIFFERENT widths: the typed params cache
+--echo # parses/stores width=5 and width=3 separately; decode pads to each
+CREATE TABLE t3 (
+    id INT, 
+    p5 sdk_coverage.padint(5),
+    p3 sdk_coverage.padint(3)
+);
+INSERT INTO t3 VALUES (1, '7', '7'), (2, '100', '100'), (3, '42', '42');
+SELECT id, p5, p3 FROM t3 ORDER BY id;
+--echo # ORDER BY the custom column exercises compare with the column's known params
+SELECT id, p5 FROM t3 ORDER BY p5;
+DROP TABLE t3;
+
+--echo # Inference: bare constants now infer their own params (width = digit
+--echo # count), so compare works.
+SELECT padint::compare(padint::from_string('1'), padint::from_string('2'));
+SELECT padint::compare(padint::from_string('7'), padint::from_string('7'));
+
+--echo # Typed hash: hash on a parameterized value gets &PadintParams via the cache
+SELECT padint::hash(padint::from_string('42'));
+
+--echo # Param-conflict rule: a bare '1' infers width=1 and '100' infers width=3,
+--echo # so their params conflict and compare must be rejected.
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT padint::compare(padint::from_string('1'), padint::from_string('100'));
+
+--echo # Type: tvector (parameterized, fixed-length, param-dependent storage)
+--echo # int_to_params: TVECTOR(N) -> dimension=N
+SELECT tvector::int_to_params(3);
+
+--echo # resolve_params is mutating: fills type=float and returns
+--echo # persisted_length,max_decode_buffer_length,<byte-len>,<rewritten params>
+SELECT tvector::resolve_params('dimension=3');
+SELECT tvector::resolve_params('dimension=4,type=double');
+
+--echo # Parameterized column: tvector(3) runs int_to_params(3) then resolve params.
+--echo # storage = dimension * 4 bytes (float default filled by resolve_params)
+CREATE TABLE tv (id INT, v sdk_coverage.tvector(3));
+INSERT INTO tv VALUES (1, '[1,2,3]'), (2, '[4,5,6]');
+SELECT id, v FROM tv ORDER BY id;
+--echo # ORDER BY exercises compare with the column's params
+SELECT id, v FROM tv ORDER BY v;
+DROP TABLE tv;
+
+--echo # A double-precision tvector column
+CREATE TABLE tvd (id INT, v sdk_coverage.tvector('dimension=2,type=double'));
+INSERT INTO tvd VALUES (1, '[1.5,2.5]');
+SELECT id, v FROM tvd;
+DROP TABLE tvd;
+
+--echo # Inference: bare '[1,2,3]' infers dimension=3, so compare works
+SELECT tvector::compare(tvector::from_string('[1,2,3]'), tvector::from_string('[4,5,6]'));
+--echo # Conflicting inferred dimensions (2 vs 3) are rejected
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT tvector::compare(tvector::from_string('[1,2]'), tvector::from_string('[1,2,3]'));
+
+--echo # Error: dimension over the 4096 cap is rejected at declaration
+--error ER_PARSE_ERROR
+CREATE TABLE tv_big (id INT, v sdk_coverage.tvector(5000));
+
+--echo # Error: a malformed vector literal fails at fix_fields (bad element)
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT tvector::from_string('[abc,2,3]');
+
+--echo # Error: bad values into resolve_params produce clean VDF errors
+--error ER_UDF_ERROR
+SELECT padint::resolve_params('width=abc');
+--error ER_UDF_ERROR
+SELECT tvector::resolve_params('dimension=0');
+--error ER_UDF_ERROR
+SELECT tvector::resolve_params('dimension=abc');
+--error ER_UDF_ERROR
+SELECT tvector::resolve_params('dimension=3,type=int');
+
 UNINSTALL EXTENSION sdk_coverage;

@@ -1,7 +1,9 @@
 //! Preview capabilities — opt-in, versioned access to server internals.
 //! Gated server-side by `vsql_allow_preview_extensions` (default OFF).
 
+pub mod keyring;
 pub mod ping;
+pub mod status_var;
 pub mod sys_var;
 pub mod thread_worker;
 

@@ -1,0 +1,22 @@
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_status_var;
+# Both status variables appear with their defaults (requests=0, load=0.5)
+SHOW GLOBAL STATUS LIKE 'vsql_status_var.%';
+Variable_name	Value
+vsql_status_var.load	0.500000
+vsql_status_var.requests	0
+# bump() increments the requests counter
+SELECT vsql_status_var.bump() AS first;
+first
+1
+SELECT vsql_status_var.bump() AS second;
+second
+2
+# SHOW STATUS reflects the updated counter live
+SHOW GLOBAL STATUS LIKE 'vsql_status_var.%';
+Variable_name	Value
+vsql_status_var.load	0.500000
+vsql_status_var.requests	2
+UNINSTALL EXTENSION vsql_status_var;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

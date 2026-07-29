@@ -13,14 +13,16 @@ pub use paste;
 pub use villagesql_sys as sys;
 pub mod preview;
 
+use std::collections::HashMap;
 use std::ffi::c_char;
+use std::sync::{OnceLock, RwLock};
 use villagesql_sys::{
     vef_func_desc_t, vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t, vef_required_capability_t,
     vef_return_value_type_t_VEF_RESULT_ERROR, vef_return_value_type_t_VEF_RESULT_NULL,
     vef_return_value_type_t_VEF_RESULT_VALUE, vef_return_value_type_t_VEF_RESULT_WARNING,
     vef_signature_t, vef_type_desc_t, vef_type_id_VEF_TYPE_CUSTOM, vef_type_id_VEF_TYPE_INT,
-    vef_type_id_VEF_TYPE_REAL, vef_type_id_VEF_TYPE_STRING, vef_type_t, vef_vdf_args_t,
-    vef_vdf_result_t, vef_version_t, VEF_MAX_ERROR_LEN,
+    vef_type_id_VEF_TYPE_REAL, vef_type_id_VEF_TYPE_STRING, vef_type_params_t, vef_type_t,
+    vef_vdf_args_t, vef_vdf_result_t, vef_version_t, VEF_MAX_ERROR_LEN,
 };
 
 use crate::preview::RequiredCapability;
@@ -84,15 +86,299 @@ impl Type {
 /// A single input value delivered to a VDF for one row.
 ///
 /// Always check for [`InValue::Null`] before attempting to read the inner value.
-/// For custom types the binary persisted bytes are exposed as [`InValue::Custom`].
+/// For custom types the binary persisted bytes are exposed as
+/// [`InValue::Custom`]. If it's a custom type with parameters, then the binary
+/// persisted bytes and parameters are exposed as [`InValue::CustomWithParams`].
 #[derive(Debug)]
 pub enum InValue<'a> {
     Null,
     String(&'a str),
     Real(f64),
     Int(i64),
-    /// Raw binary bytes for a custom-type argument (persisted format).
+    /// A custom-type argument: just its raw persisted bytes.
     Custom(&'a [u8]),
+    /// A custom-type argument: its raw persisted bytes plus the type parameters
+    /// the column was declared with.
+    CustomWithParams {
+        bytes: &'a [u8],
+        params: TypeParams<'a>,
+    },
+}
+
+/// Read only view of a parameterized custom type's parameters.
+///
+/// Parameters arrive as canonical `key=value` pairs (e.g. `dimension=536`).
+/// This is a borrowed, zero-copy view over the server provided arrays: a pair
+/// is only decoded when you read it, so there is no per row allocation.
+#[derive(Copy, Clone)]
+pub struct TypeParams<'a> {
+    raw: &'a vef_type_params_t,
+}
+
+impl<'a> TypeParams<'a> {
+    /// How many parameters there are. Zero for non-parameterized types.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.raw.count as usize
+    }
+
+    /// True when there are no parameters.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Look up one parameter by name, e.g. `params.get("max_size")`.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&'a str> {
+        self.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+    }
+
+    /// Walk through every `(key, value)` pair.
+    pub fn iter(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
+        let (keys, values) = (self.raw.keys, self.raw.values);
+        (0..self.len()).map(move |i| unsafe {
+            // SAFETY: for every index below `count`, the server guarantees
+            // keys[i]/values[i] point to valid, NUL-terminated UTF-8 strings.
+            (cstr_to_str(*keys.add(i)), cstr_to_str(*values.add(i)))
+        })
+    }
+}
+
+impl std::fmt::Debug for TypeParams<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+/// Parsed, borrowed view of a custom type's canonical parameter string
+/// (`key=value,key=value,...`). Built by the SDK from the `resolve_params`
+/// argument; borrows the input, so there are no string copies.
+#[derive(Debug)]
+pub struct Params<'a> {
+    pairs: Vec<(&'a str, &'a str)>,
+}
+
+impl<'a> Params<'a> {
+    /// Parse a canonical params string. An empty string yields no params.
+    #[must_use]
+    pub fn parse(s: &'a str) -> Self {
+        let mut pairs = Vec::new();
+        if !s.is_empty() {
+            for entry in s.split(',') {
+                // Match the C++ SDK: an entry with no '=' becomes a key
+                // with an empty value, rather than being dropped.
+                match entry.split_once('=') {
+                    Some((k, v)) => pairs.push((k, v)),
+                    None => pairs.push((entry, "")),
+                }
+            }
+        }
+        Self { pairs }
+    }
+
+    /// Look up one parameter value by key.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&'a str> {
+        self.pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
+    }
+
+    /// Walk every `(key, value)` pair, in order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
+        self.pairs.iter().copied()
+    }
+
+    /// Number of parameters.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pairs.len()
+    }
+
+    /// True when there are no parameters.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+}
+
+/// Type parameters that may or may not be known yet.
+///
+/// On the normal (row-time) path a custom value's params are already known.
+/// On the inference path (a bare constant with no column to anchor it) they
+/// start unknown, and the type's `encode` fn infers them from the value and
+/// calls [`MaybeParams::set`]. The framework then publishes them back to the
+/// server.
+pub struct MaybeParams<P> {
+    params: Option<P>,
+}
+
+impl<P> MaybeParams<P> {
+    /// Construct in the unknown state (params to be inferred).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self { params: None }
+    }
+
+    /// Construct in the known state.
+    #[must_use]
+    pub fn present(params: P) -> Self {
+        Self {
+            params: Some(params),
+        }
+    }
+
+    /// True if the params are already known.
+    #[must_use]
+    pub fn is_known(&self) -> bool {
+        self.params.is_some()
+    }
+
+    /// The params, if known.
+    #[must_use]
+    pub fn get(&self) -> Option<&P> {
+        self.params.as_ref()
+    }
+
+    /// Record the inferred params (transitions unknown to known).
+    pub fn set(&mut self, params: P) {
+        self.params = Some(params);
+    }
+}
+
+/// The outcome of a parameterized type's `resolve_params`.
+///
+/// Carries the resolved storage sizes, and optionally a rewritten parameter
+/// set (the mutating form) used to fill in defaults. When present, the server
+/// persists the rewritten params in place of the input.
+pub struct Resolved {
+    persisted_length: i64,
+    max_decode_buffer_length: i64,
+    rewritten: Option<Vec<(String, String)>>,
+}
+
+impl Resolved {
+    /// The const form: just the resolved sizes. Params left unchanged.
+    #[must_use]
+    pub fn new(persisted_length: i64, max_decode_buffer_length: i64) -> Self {
+        Self {
+            persisted_length,
+            max_decode_buffer_length,
+            rewritten: None,
+        }
+    }
+
+    /// The mutating form: resolved sizes plus a rewritten param set that
+    /// replaces the input (e.g. to fill defaults).
+    #[must_use]
+    pub fn rewrite(
+        persisted_length: i64,
+        max_decode_buffer_length: i64,
+        params: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            persisted_length,
+            max_decode_buffer_length,
+            rewritten: Some(params),
+        }
+    }
+
+    /// Serialize to the string form the server expects from `resolve_params`:
+    /// - const:    `<persisted_length>,<max_decode_buffer_length>`
+    /// - mutating: `<p>,<m>,<byte-len>[,<canonical params>]`
+    ///
+    /// The byte length makes the training params section self-delimiting.
+    #[must_use]
+    pub fn to_wire_string(&self) -> String {
+        let base = format!(
+            "{},{}",
+            self.persisted_length, self.max_decode_buffer_length
+        );
+        let Some(pairs) = &self.rewritten else {
+            return base; // returns here with const form
+        };
+
+        let canonical =
+            canonical_params_string(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+
+        let out = if canonical.is_empty() {
+            format!("{base},0")
+        } else {
+            format!("{base},{},{canonical}", canonical.len())
+        };
+        out
+    }
+}
+
+/// A thread-safe, parse-once cache mapping a canonical params string to its
+/// typed form `P`. One concrete cache exists per parameterized type. The
+/// `parameterized_type!` macro creates a `static` holding it.
+pub struct TypeParamsCache<P: 'static> {
+    map: OnceLock<RwLock<HashMap<String, &'static P>>>,
+}
+
+impl<P: Send + Sync + 'static> TypeParamsCache<P> {
+    /// Create an empty cache. `const` so it can initialize a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            map: OnceLock::new(),
+        }
+    }
+
+    fn map(&self) -> &RwLock<HashMap<String, &'static P>> {
+        self.map.get_or_init(|| RwLock::new(HashMap::new()))
+    }
+
+    /// Typed params for `raw`, parsing + caching on first sight.
+    ///
+    /// # Panics
+    /// Panics if the cache lock is poisoned (a thread panicked while holding it).
+    pub fn get(&self, raw: TypeParams, parse: fn(Params) -> P) -> &'static P {
+        let key = canonical_key(raw);
+
+        // Fast path: shared read lock; most calls hit an existing entry.
+        if let Some(&p) = self.map().read().unwrap().get(&key) {
+            return p;
+        }
+
+        // Miss: exclusive write lock, re-check (another thread may have been
+        // in a race), then parse once and insert.
+        let mut map = self.map().write().unwrap();
+        if let Some(&p) = map.get(&key) {
+            return p;
+        }
+        let parsed: &'static P = Box::leak(Box::new(parse(Params::parse(&key))));
+        map.insert(key, parsed);
+        parsed
+    }
+}
+
+impl<P: Send + Sync + 'static> Default for TypeParamsCache<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Build the canonical `key=value,key=value` string with keys sorted — the
+/// exact wire form the server expects. Single source of truth for the three
+/// places that need it (cache key, `resolve_params` output, inferred params).
+fn canonical_params_string<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    let mut pairs: Vec<(&str, &str)> = pairs.into_iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    let mut out = String::new();
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(k);
+        out.push('=');
+        out.push_str(v);
+    }
+    out
+}
+
+fn canonical_key(raw: TypeParams) -> String {
+    canonical_params_string(raw.iter())
 }
 
 /// The value a VDF returns for one row.
@@ -180,8 +466,16 @@ pub struct TypeDescriptor {
     pub compare_vdf_name: *const c_char,
     /// Null-terminated name of the `TYPE::hash` VDF, or null if not provided.
     pub hash_vdf_name: *const c_char,
+    /// Null-terminated name of the `TYPE::int_to_params` VDF, or null if not parameterized.
+    pub int_to_params_vdf_name: *const c_char,
+    /// Null-terminated name of the `TYPE::resolve_params` VDF, or null if not parameterized.
+    pub resolve_params_vdf_name: *const c_char,
+    /// Upper bound on persisted bytes across all parameter values. 0 for non-parameterized types.
+    pub max_persisted_length: i64,
     /// Optional null-terminated default value string (encoded at install time).
     pub intrinsic_default_str: *const c_char,
+    /// Null-terminated name of the `TYPE::intrinsic_default` VDF, or null.
+    pub intrinsic_default_vdf_name: *const c_char,
 }
 
 unsafe impl Send for TypeDescriptor {}
@@ -234,7 +528,14 @@ pub unsafe fn dispatch_vdf(
             t if t == vef_type_id_VEF_TYPE_CUSTOM => {
                 let anon = &v.__bindgen_anon_1.__bindgen_anon_2;
                 let bytes = std::slice::from_raw_parts(anon.bin_value, anon.bin_len);
-                InValue::Custom(bytes)
+                let params = TypeParams {
+                    raw: &anon.type_params,
+                };
+                if params.is_empty() {
+                    InValue::Custom(bytes)
+                } else {
+                    InValue::CustomWithParams { bytes, params }
+                }
             }
             _ => InValue::Null,
         };
@@ -244,31 +545,159 @@ pub unsafe fn dispatch_vdf(
     write_result(f(&in_values), result);
 }
 
+/// Dispatch a parameterized type's `from_string` (encode), including the
+/// constant-string inference path.
+///
+/// Reads the STRING argument, builds a [`MaybeParams<P>`] from the input params
+/// the server attached (present iff `count > 0`), calls the author's `encode`
+/// (which may infer + `set` params), writes the encoded bytes, and on the
+/// inference path publishes the inferred params back via `out_type_params`.
+///
+/// # Safety
+/// `args` and `result` must be valid for the duration of the call.
+pub unsafe fn dispatch_from_string_typed<P>(
+    encode: fn(&str, &mut MaybeParams<P>) -> Result<Vec<u8>, String>,
+    parse: fn(Params) -> P,
+    to_strings: fn(&P) -> Vec<(String, String)>,
+    args: *mut vef_vdf_args_t,
+    result: *mut vef_vdf_result_t,
+) {
+    let args = &*args;
+    let result = &mut *result;
+
+    // Pull the sole STRING argument out of the raw arg array. A NULL or missing
+    // argument yields a NULL result. Anything else is a usage error.
+    let raw_vals =
+        std::slice::from_raw_parts(args.__bindgen_anon_1.values, args.value_count as usize);
+    let s: &str = match raw_vals.first().map(|&ptr| &*ptr) {
+        Some(v) if !v.is_null && v.type_ == vef_type_id_VEF_TYPE_STRING => {
+            let anon = &v.__bindgen_anon_1.__bindgen_anon_1;
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                anon.str_value.cast::<u8>(),
+                anon.str_len,
+            ))
+        }
+        Some(v) if v.is_null => {
+            result.type_ = vef_return_value_type_t_VEF_RESULT_NULL;
+            return;
+        }
+        None => {
+            result.type_ = vef_return_value_type_t_VEF_RESULT_NULL;
+            return;
+        }
+        _ => {
+            write_result(
+                VdfReturn::error("from_string: expected STRING argument"),
+                result,
+            );
+            return;
+        }
+    };
+
+    // The server attaches any params it already knows to the binary result slot.
+    // A non-empty set means the value came from a typed column. An empty set
+    // (count == 0) means it's a bare constant whose params we must infer.
+    let input = &result.__bindgen_anon_1.__bindgen_anon_2.type_params;
+    let input_known = input.count > 0;
+    let mut maybe = if input_known {
+        let key = canonical_key(TypeParams { raw: input });
+        MaybeParams::present(parse(Params::parse(&key)))
+    } else {
+        MaybeParams::empty()
+    };
+
+    // Run the author's encoder. When params were unknown, this is where it
+    // inspects the string and fills them in via `set`.
+    let ret = match encode(s, &mut maybe) {
+        Ok(bytes) => VdfReturn::Binary(bytes),
+        Err(e) => VdfReturn::error(e),
+    };
+    write_result(ret, result);
+
+    // If the author inferred params (and the server gave us a buffer for them),
+    // serialize them back so downstream operators see a fully-typed value.
+    let succeeded = result.type_ == vef_return_value_type_t_VEF_RESULT_VALUE;
+    if succeeded && !input_known && !result.out_type_params.is_null() {
+        if let Some(p) = maybe.get() {
+            let pairs = to_strings(p);
+            let out = &mut *result.out_type_params;
+            let buf: &mut [u8] = if out.buf.is_null() || out.max_buf_len == 0 {
+                &mut []
+            } else {
+                std::slice::from_raw_parts_mut(out.buf.cast::<u8>(), out.max_buf_len)
+            };
+            let (needed, overflow) = write_inferred_params(buf, &pairs);
+            out.actual_len = needed;
+            out.overflow = overflow;
+        }
+    }
+}
+
+/// Dispatch a parameterized type's intrinsic-default VDF: compute the type's
+/// default value (as a string) from its parameters. The server calls this once
+/// per parameterized instantiation at DDL time, then encodes the string via
+/// `from_string` and caches the result.
+/// # Safety
+/// `result` must be valid for the duration of the call.
+pub unsafe fn dispatch_intrinsic_default_typed<P>(
+    default_fn: fn(&P) -> Result<String, String>,
+    parse: fn(Params) -> P,
+    _args: *mut vef_vdf_args_t,
+    result: *mut vef_vdf_result_t,
+) {
+    let result = &mut *result;
+
+    // The type params ride on the (binary) result slot, as with from_string.
+    let params = {
+        let raw = &result.__bindgen_anon_1.__bindgen_anon_2.type_params;
+        parse(Params::parse(&canonical_key(TypeParams { raw })))
+    };
+
+    let ret = match default_fn(&params) {
+        Ok(s) => VdfReturn::String(s),
+        Err(e) => VdfReturn::error(e),
+    };
+    write_result(ret, result);
+}
+
+/// Copy `bytes` into the server's result buffer `buf` (capacity `max`) and mark
+/// the result a VALUE. If it doesn't fit, set an error rather than truncate.
+///
+/// # Safety
+/// `buf` must be writable for `max` bytes, and `result.error_msg` must be valid.
+unsafe fn write_bytes_or_error(
+    bytes: &[u8],
+    buf: *mut u8,
+    max: usize,
+    result: &mut vef_vdf_result_t,
+) {
+    if bytes.len() <= max {
+        // Fits the server-provided buffer.
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+        result.actual_len = bytes.len();
+        result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
+    } else {
+        // Too large for the result buffer. Errors rather than truncates.
+        // The function should declare a larger buffer_size in func!.
+        let msg = format!(
+            "result of {} bytes exceeds the {max}-byte buffer. \
+            Declare a larger buffer_size in func!",
+            bytes.len()
+        );
+        result.type_ = vef_return_value_type_t_VEF_RESULT_ERROR;
+        write_error_msg(msg.as_bytes(), result.error_msg);
+    }
+}
+
 unsafe fn write_result(ret: VdfReturn, result: &mut vef_vdf_result_t) {
     match ret {
         VdfReturn::Null => {
             result.type_ = vef_return_value_type_t_VEF_RESULT_NULL;
         }
         VdfReturn::String(s) => {
-            let bytes = s.as_bytes();
             let anon = &result.__bindgen_anon_1.__bindgen_anon_1;
-            let (str_buf, max) = (anon.str_buf, anon.max_str_len);
-            if bytes.len() <= max {
-                // Fits the server-provided buffer (sized via func!'s buffer_size).
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), str_buf.cast::<u8>(), bytes.len());
-                result.actual_len = bytes.len();
-                result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
-            } else {
-                // Too large for the result buffer. Error rather than truncate —
-                // the function should declare a larger buffer_size in func!.
-                let msg = format!(
-                    "result of {} bytes exceeds the {max}-byte buffer; \
-                     declare a larger buffer_size in func!",
-                    bytes.len()
-                );
-                result.type_ = vef_return_value_type_t_VEF_RESULT_ERROR;
-                write_error_msg(msg.as_bytes(), result.error_msg);
-            }
+            let (buf, max) = (anon.str_buf.cast::<u8>(), anon.max_str_len);
+            write_bytes_or_error(s.as_bytes(), buf, max, result);
         }
         VdfReturn::Real(v) => {
             result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
@@ -280,23 +709,8 @@ unsafe fn write_result(ret: VdfReturn, result: &mut vef_vdf_result_t) {
         }
         VdfReturn::Binary(bytes) => {
             let anon = &result.__bindgen_anon_1.__bindgen_anon_2;
-            let (bin_buf, max) = (anon.bin_buf, anon.max_bin_len);
-            if bytes.len() <= max {
-                // Fits the server-provided buffer (sized via func!'s buffer_size).
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), bin_buf, bytes.len());
-                result.actual_len = bytes.len();
-                result.type_ = vef_return_value_type_t_VEF_RESULT_VALUE;
-            } else {
-                // Too large for the result buffer. Error rather than truncate —
-                // the function should declare a larger buffer_size in func!.
-                let msg = format!(
-                    "result of {} bytes exceeds the {max}-byte buffer; \
-                     declare a larger buffer_size in func!",
-                    bytes.len()
-                );
-                result.type_ = vef_return_value_type_t_VEF_RESULT_ERROR;
-                write_error_msg(msg.as_bytes(), result.error_msg);
-            }
+            let (buf, max) = (anon.bin_buf, anon.max_bin_len);
+            write_bytes_or_error(&bytes, buf, max, result);
         }
         VdfReturn::Warning(msg) => {
             result.type_ = vef_return_value_type_t_VEF_RESULT_WARNING;
@@ -309,11 +723,33 @@ unsafe fn write_result(ret: VdfReturn, result: &mut vef_vdf_result_t) {
     }
 }
 
+/// Serialize inferred type parameters into `buf` as canonical `key=value,...` (keys
+/// sorted). snprintf-style: writes what fits and returns `(actual_len,
+/// overflow)`, where `actual_len` is the full length needed and `overflow` is
+/// true when it didn't all fit.
+#[must_use]
+pub fn write_inferred_params(buf: &mut [u8], pairs: &[(String, String)]) -> (usize, bool) {
+    let joined = canonical_params_string(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    let bytes = joined.as_bytes();
+    let needed = bytes.len();
+    let n = needed.min(buf.len());
+    buf[..n].copy_from_slice(&bytes[..n]);
+    (needed, needed > buf.len())
+}
+
 unsafe fn write_error_msg(msg: &[u8], buf: *mut c_char) {
     let max = (VEF_MAX_ERROR_LEN as usize).saturating_sub(1);
     let n = msg.len().min(max);
     std::ptr::copy_nonoverlapping(msg.as_ptr(), buf.cast::<u8>(), n);
     *buf.add(n) = 0;
+}
+
+/// Turn a C string pointer into a borrowed `&str`.
+///
+/// # Safety
+/// `p` must point to a valid, NUL-terminated, UTF-8 string that lives for `'a`.
+unsafe fn cstr_to_str<'a>(p: *const c_char) -> &'a str {
+    std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(p).to_bytes())
 }
 
 unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
@@ -381,11 +817,11 @@ pub unsafe fn build_registration(
             decode_vdf_name: t.descriptor.decode_vdf_name,
             compare_vdf_name: t.descriptor.compare_vdf_name,
             hash_vdf_name: t.descriptor.hash_vdf_name,
-            int_to_params_vdf_name: std::ptr::null(),
-            resolve_params_vdf_name: std::ptr::null(),
-            intrinsic_default_vdf_name: std::ptr::null(),
+            int_to_params_vdf_name: t.descriptor.int_to_params_vdf_name,
+            resolve_params_vdf_name: t.descriptor.resolve_params_vdf_name,
+            intrinsic_default_vdf_name: t.descriptor.intrinsic_default_vdf_name,
             intrinsic_default_str: t.descriptor.intrinsic_default_str,
-            max_persisted_length: 0,
+            max_persisted_length: t.descriptor.max_persisted_length,
         })));
     }
     let type_count = u32::try_from(type_ptrs.len()).expect("type count exceeds u32");
@@ -612,49 +1048,22 @@ macro_rules! func {
     };
 }
 
-/// Build a [`TypeWithFuncs`] for a custom SQL type, generating the four
-/// SQL-callable VDFs (`TYPE::from_string`, `TYPE::to_string`, `TYPE::compare`,
-/// and optionally `TYPE::hash`) automatically.
-///
-/// Required fields: `type_name`, `persisted_length`, `max_decode_buffer_length`,
-/// `encode`, `decode`, `compare`.
-///
-/// Optional fields: `hash` (recommended for indexed columns),
-/// `default` (string literal encoded at install time).
-///
-/// Rust function signatures required:
-/// - `encode`: `fn(&str) -> Result<Vec<u8>, String>`
-/// - `decode`: `fn(&[u8]) -> Result<String, String>`
-/// - `compare`: `fn(&[u8], &[u8]) -> std::cmp::Ordering`
-/// - `hash`: `fn(&[u8]) -> usize`
-///
-/// ```ignore
-/// villagesql::custom_type!(
-///     type_name: "rational",
-///     persisted_length: 16,
-///     max_decode_buffer_length: 42,
-///     encode: rational_encode,
-///     decode: rational_decode,
-///     compare: rational_compare,
-///     hash: rational_hash,
-///     default: "0/1",
-/// )
-/// ```
+/// Internal: emits the four shared VDFs (`from_string`/`to_string`/`compare`/`hash`)
+/// for a custom type and evaluates to a `Vec<FuncDescriptor>` registering them.
+/// Not part of the public API — called by `custom_type!` and `parameterized_type!`.
 #[macro_export]
-macro_rules! custom_type {
+#[doc(hidden)]
+macro_rules! __vsql_type_vdfs {
     (
         type_name: $type_name:literal,
-        persisted_length: $plen:expr,
-        max_decode_buffer_length: $max_dec:expr,
         encode: $enc_fn:ident,
         decode: $dec_fn:ident,
         compare: $cmp_fn:ident
         $(, hash: $hash_fn:ident)?
-        $(, default: $default_str:literal)?
         $(,)?
     ) => {{
         $crate::paste::paste! {
-            // ── TYPE::from_string(STRING) -> CUSTOM ───────────────────────────
+            // TYPE::from_string(STRING) -> CUSTOM
             fn [< __vsql_from_string_vdf_ $enc_fn >](
                 args: &[$crate::InValue],
             ) -> $crate::VdfReturn {
@@ -679,7 +1088,7 @@ macro_rules! custom_type {
             static [< __VSQL_FROM_STRING_PARAMS_ $enc_fn:upper >]: &[$crate::Type] =
                 &[$crate::Type::String];
 
-            // ── TYPE::to_string(CUSTOM) -> STRING ─────────────────────────────
+            // TYPE::to_string(CUSTOM) -> STRING
             fn [< __vsql_to_string_vdf_ $dec_fn >](
                 args: &[$crate::InValue],
             ) -> $crate::VdfReturn {
@@ -704,7 +1113,7 @@ macro_rules! custom_type {
             static [< __VSQL_TO_STRING_PARAMS_ $dec_fn:upper >]: &[$crate::Type] =
                 &[$crate::custom!($type_name)];
 
-            // ── TYPE::compare(CUSTOM, CUSTOM) -> INT ──────────────────────────
+            // TYPE::compare(CUSTOM, CUSTOM) -> INT
             fn [< __vsql_compare_vdf_ $cmp_fn >](
                 args: &[$crate::InValue],
             ) -> $crate::VdfReturn {
@@ -731,7 +1140,7 @@ macro_rules! custom_type {
                 $crate::custom!($type_name),
             ];
 
-            // ── TYPE::hash(CUSTOM) -> INT (optional) ──────────────────────────
+            // TYPE::hash(CUSTOM) -> INT (optional)
             $(
                 fn [< __vsql_hash_vdf_ $hash_fn >](
                     args: &[$crate::InValue],
@@ -757,22 +1166,10 @@ macro_rules! custom_type {
                     &[$crate::custom!($type_name)];
             )?
 
-            // ── Assemble TypeWithFuncs ─────────────────────────────────────────
-            #[allow(unused_mut)]
-            let mut __default: *const ::std::ffi::c_char = ::std::ptr::null();
-            $( __default = concat!($default_str, "\0").as_bytes().as_ptr()
-                as *const ::std::ffi::c_char; )?
-
-            #[allow(unused_mut)]
-            let mut __hash_vdf_name: *const ::std::ffi::c_char = ::std::ptr::null();
-            $( let _ = stringify!($hash_fn);
-               __hash_vdf_name = concat!($type_name, "::hash\0").as_bytes().as_ptr()
-                as *const ::std::ffi::c_char; )?
-
+            // Register them, evaluate to the Vec
             #[allow(unused_mut)]
             let mut __embedded: ::std::vec::Vec<$crate::FuncDescriptor> =
                 ::std::vec::Vec::new();
-
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::from_string\0").as_bytes().as_ptr()
                     as *const ::std::os::raw::c_char,
@@ -812,23 +1209,505 @@ macro_rules! custom_type {
                 });
             )?
 
-            $crate::TypeWithFuncs {
-                descriptor: $crate::TypeDescriptor {
-                    sql_name: concat!($type_name, "\0").as_bytes().as_ptr()
-                        as *const ::std::ffi::c_char,
-                    persisted_length: $plen,
-                    max_decode_buffer_length: $max_dec,
-                    encode_vdf_name: concat!($type_name, "::from_string\0").as_bytes().as_ptr()
-                        as *const ::std::ffi::c_char,
-                    decode_vdf_name: concat!($type_name, "::to_string\0").as_bytes().as_ptr()
-                        as *const ::std::ffi::c_char,
-                    compare_vdf_name: concat!($type_name, "::compare\0").as_bytes().as_ptr()
-                        as *const ::std::ffi::c_char,
-                    hash_vdf_name: __hash_vdf_name,
-                    intrinsic_default_str: __default,
-                },
-                embedded_funcs: __embedded,
-            }
+            __embedded
         }
     }};
+}
+
+/// Internal: like `__vsql_type_vdfs!` but for parameterized types with a typed
+/// params struct `P`. `to_string`/`compare`/`hash` receive `&P` from a per-type
+/// `TypeParamsCache<P>` (defined here). `from_string` stays untyped (no params
+/// on its STRING input). Not part of the public API.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __vsql_type_vdfs_typed {
+    (
+        type_name: $type_name:literal,
+        encode: $enc_fn:ident,
+        decode: $dec_fn:ident,
+        compare: $cmp_fn:ident,
+        int_to_params: $i2p_fn:ident,
+        resolve_params: $rp_fn:ident,
+        max_decode_buffer_length: $max_dec:expr,
+        params_type: $p_ty:ty,
+        params_parse: $parse_fn:ident,
+        params_to_strings: $to_strings_fn:ident
+        $(, hash: $hash_fn:ident)?
+        $(, intrinsic_default_fn: $default_fn:ident)?
+        $(,)?
+    ) => {{
+        $crate::paste::paste! {
+            // Per-type params cache: parses P once per distinct params string
+            static [< __VSQL_PARAMS_CACHE_$dec_fn:upper >]:
+                $crate::TypeParamsCache<$p_ty> = $crate::TypeParamsCache::new();
+
+            // TYPE::from_string(STRING) -> CUSTOM (typed; may infer params)
+            unsafe extern "C" fn [< __vsql_trampoline_from_string_ $enc_fn >] (
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_from_string_typed(
+                    $enc_fn, $parse_fn, $to_strings_fn, args, result
+                );
+            }
+            static [< __VSQL_FROM_STRING_PARAMS_ $enc_fn:upper >]: &[$crate::Type] =
+                &[$crate::Type::String];
+
+            // TYPE::to_string(CUSTOM) -> STRING (typed)
+            fn [< __vsql_to_string_vdf_ $dec_fn >](
+                args: &[$crate::InValue],
+            ) -> $crate::VdfReturn {
+                match args.get(0) {
+                    Some($crate::InValue::CustomWithParams{ bytes: b, params: tp }) => {
+                        let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, $parse_fn);
+                        match $dec_fn(b, p) {
+                            Ok(s) => $crate::VdfReturn::String(s),
+                            Err(e) => $crate::VdfReturn::error(e),
+                        }
+                    }
+                    Some($crate::InValue::Null) | None => $crate::VdfReturn::null(),
+                    _ => $crate::VdfReturn::error(
+                        concat!($type_name, "::to_string: expected CUSTOM argument"),
+                    ),
+                }
+            }
+            unsafe extern "C" fn [< __vsql_trampoline_to_string_ $dec_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_vdf([< __vsql_to_string_vdf_ $dec_fn >], args, result);
+            }
+            static [< __VSQL_TO_STRING_PARAMS_ $dec_fn:upper >]: &[$crate::Type] =
+                &[$crate::custom!($type_name)];
+
+            // TYPE::compare(CUSTOM, CUSTOM) -> INT (typed)
+            fn [< __vsql_compare_vdf_ $cmp_fn >](
+                args: &[$crate::InValue],
+            ) -> $crate::VdfReturn {
+                match (args.get(0), args.get(1)) {
+                    (
+                        Some($crate::InValue::CustomWithParams{ bytes: a, params: tp }),
+                        Some($crate::InValue::CustomWithParams{ bytes: b, .. }),
+                    ) => {
+                        let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, $parse_fn);
+                        $crate::VdfReturn::Int(match $cmp_fn(a, b, p) {
+                            ::std::cmp::Ordering::Less => -1,
+                            ::std::cmp::Ordering::Equal => 0,
+                            ::std::cmp::Ordering::Greater => 1,
+                        })
+                    }
+                    _ => $crate::VdfReturn::null(),
+                }
+            }
+            unsafe extern "C" fn [< __vsql_trampoline_compare_ $cmp_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_vdf([< __vsql_compare_vdf_ $cmp_fn >], args, result);
+            }
+            static [< __VSQL_COMPARE_PARAMS_ $cmp_fn:upper >]: &[$crate::Type] = &[
+                $crate::custom!($type_name),
+                $crate::custom!($type_name),
+            ];
+
+            // TYPE::hash(CUSTOM) -> INT (optional, typed)
+            $(
+                fn [< __vsql_hash_vdf_ $hash_fn >](
+                    args: &[$crate::InValue],
+                ) -> $crate::VdfReturn {
+                    match args.get(0) {
+                        Some($crate::InValue::CustomWithParams{ bytes: b, params: tp }) => {
+                            let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, $parse_fn);
+                            $crate::VdfReturn::Int($hash_fn(b, p) as i64)
+                        }
+                        Some($crate::InValue::Null) | None => $crate::VdfReturn::null(),
+                        _ => $crate::VdfReturn::error(
+                            concat!($type_name, "::hash: expected CUSTOM argument"),
+                        ),
+                    }
+                }
+                unsafe extern "C" fn [< __vsql_trampoline_hash_ $hash_fn >](
+                    _ctx: *mut $crate::sys::vef_context_t,
+                    args: *mut $crate::sys::vef_vdf_args_t,
+                    result: *mut $crate::sys::vef_vdf_result_t,
+                ) {
+                    $crate::dispatch_vdf([< __vsql_hash_vdf_ $hash_fn >], args, result);
+                }
+                static [< __VSQL_HASH_PARAMS_ $hash_fn:upper >]: &[$crate::Type] =
+                    &[$crate::custom!($type_name)];
+            )?
+
+            // TYPE::int_to_params(INT) -> STRING
+            fn [< __vsql_int_to_params_vdf_ $i2p_fn >](
+                args: &[$crate::InValue],
+            ) -> $crate::VdfReturn {
+                match args.get(0) {
+                    Some($crate::InValue::Int(n)) => match $i2p_fn(*n) {
+                        Ok(s) => $crate::VdfReturn::String(s),
+                        Err(e) => $crate::VdfReturn::error(e),
+                    },
+                    Some($crate::InValue::Null) | None => $crate::VdfReturn::null(),
+                    _ => $crate::VdfReturn::error(
+                        concat!($type_name, "::int_to_params: expected INT argument"),
+                    ),
+                }
+            }
+            unsafe extern "C" fn [< __vsql_trampoline_int_to_params_ $i2p_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_vdf([< __vsql_int_to_params_vdf_ $i2p_fn >], args, result);
+            }
+            static [< __VSQL_INT_TO_PARAMS_PARAMS_ $i2p_fn:upper >]: &[$crate::Type] =
+                &[$crate::Type::Int];
+
+            // TYPE::resolve_params(STRING) -> STRING
+            fn [< __vsql_resolve_params_vdf_ $rp_fn >](
+                args: &[$crate::InValue],
+            ) -> $crate::VdfReturn {
+                match args.get(0) {
+                    Some($crate::InValue::String(s)) => {
+                        match $rp_fn($crate::Params::parse(s)) {
+                            Ok(resolved) => $crate::VdfReturn::String(resolved.to_wire_string()),
+                            Err(e) => $crate::VdfReturn::error(e),
+                        }
+                    }
+                    Some($crate::InValue::Null) | None => $crate::VdfReturn::null(),
+                    _ => $crate::VdfReturn::error(
+                        concat!($type_name, "::resolve_params: expected STRING argument"),
+                    ),
+                }
+            }
+            unsafe extern "C" fn [< __vsql_trampoline_resolve_params_ $rp_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_vdf([< __vsql_resolve_params_vdf_ $rp_fn >], args, result);
+            }
+            static [< __VSQL_RESOLVE_PARAMS_PARAMS_ $rp_fn:upper >]: &[$crate::Type] =
+                &[$crate::Type::String];
+
+            // TYPE::intrinsic_default() -> STRING (optional)
+            $(
+                unsafe extern "C" fn [< __vsql_trampoline_intrinsic_default_ $default_fn >](
+                    _ctx: *mut $crate::sys::vef_context_t,
+                    args: *mut $crate::sys::vef_vdf_args_t,
+                    result: *mut $crate::sys::vef_vdf_result_t,
+                ) {
+                    $crate::dispatch_intrinsic_default_typed($default_fn, $parse_fn, args, result);
+                }
+                static [< __VSQL_INTRINSIC_DEFAULT_PARAMS_ $default_fn:upper >]: &[$crate::Type] = &[];
+            )?
+
+            // Register them, evaluate to the Vec
+            #[allow(unused_mut)]
+            let mut __embedded: ::std::vec::Vec<$crate::FuncDescriptor> =
+                ::std::vec::Vec::new();
+            __embedded.push($crate::FuncDescriptor {
+                sql_name: concat!($type_name, "::from_string\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: [< __VSQL_FROM_STRING_PARAMS_ $enc_fn:upper >],
+                returns: $crate::custom!($type_name),
+                trampoline: [< __vsql_trampoline_from_string_ $enc_fn >],
+                buffer_size: 0,
+                deterministic: true,
+            });
+            __embedded.push($crate::FuncDescriptor {
+                sql_name: concat!($type_name, "::to_string\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: [< __VSQL_TO_STRING_PARAMS_ $dec_fn:upper >],
+                returns: $crate::Type::String,
+                trampoline: [< __vsql_trampoline_to_string_ $dec_fn >],
+                buffer_size: 0,
+                deterministic: true,
+            });
+            __embedded.push($crate::FuncDescriptor {
+                sql_name: concat!($type_name, "::compare\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: [< __VSQL_COMPARE_PARAMS_ $cmp_fn:upper >],
+                returns: $crate::Type::Int,
+                trampoline: [< __vsql_trampoline_compare_ $cmp_fn >],
+                buffer_size: 0,
+                deterministic: true,
+            });
+            $(
+                __embedded.push($crate::FuncDescriptor {
+                    sql_name: concat!($type_name, "::hash\0").as_bytes().as_ptr()
+                        as *const ::std::os::raw::c_char,
+                    params: [< __VSQL_HASH_PARAMS_ $hash_fn:upper >],
+                    returns: $crate::Type::Int,
+                    trampoline: [< __vsql_trampoline_hash_ $hash_fn >],
+                    buffer_size: 0,
+                    deterministic: true,
+                });
+            )?
+            __embedded.push($crate::FuncDescriptor {
+                sql_name: concat!($type_name, "::int_to_params\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: [< __VSQL_INT_TO_PARAMS_PARAMS_ $i2p_fn:upper >],
+                returns: $crate::Type::String,
+                trampoline: [< __vsql_trampoline_int_to_params_ $i2p_fn >],
+                buffer_size: 0,
+                deterministic: true,
+            });
+            __embedded.push($crate::FuncDescriptor {
+                sql_name: concat!($type_name, "::resolve_params\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: [< __VSQL_RESOLVE_PARAMS_PARAMS_ $rp_fn:upper >],
+                returns: $crate::Type::String,
+                trampoline: [< __vsql_trampoline_resolve_params_ $rp_fn >],
+                buffer_size: 0,
+                deterministic: true,
+            });
+            $(
+                __embedded.push($crate::FuncDescriptor {
+                    sql_name: concat!($type_name, "::intrinsic_default\0").as_bytes().as_ptr()
+                        as *const ::std::os::raw::c_char,
+                    params: [< __VSQL_INTRINSIC_DEFAULT_PARAMS_ $default_fn:upper >],
+                    returns: $crate::Type::String,
+                    trampoline: [< __vsql_trampoline_intrinsic_default_ $default_fn >],
+                    buffer_size: $max_dec,
+                    deterministic: true,
+                });
+            )?
+
+            __embedded
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! custom_type {
+    (
+        type_name: $type_name:literal,
+        persisted_length: $plen:expr,
+        max_decode_buffer_length: $max_dec:expr,
+        encode: $enc_fn:ident,
+        decode: $dec_fn:ident,
+        compare: $cmp_fn:ident
+        $(, hash: $hash_fn:ident)?
+        $(, default: $default_str:literal)?
+        $(,)?
+    ) => {{
+        let __embedded = $crate::__vsql_type_vdfs!(
+            type_name: $type_name,
+            encode: $enc_fn,
+            decode: $dec_fn,
+            compare: $cmp_fn
+            $(, hash: $hash_fn)?
+        );
+
+        #[allow(unused_mut)]
+        let mut __default: *const ::std::ffi::c_char = ::std::ptr::null();
+        $( __default = concat!($default_str, "\0").as_bytes().as_ptr()
+            as *const ::std::ffi::c_char; )?
+
+        #[allow(unused_mut)]
+        let mut __hash_vdf_name: *const ::std::ffi::c_char = ::std::ptr::null();
+        $( let _ = stringify!($hash_fn);
+           __hash_vdf_name = concat!($type_name, "::hash\0").as_bytes().as_ptr()
+            as *const ::std::ffi::c_char; )?
+
+        $crate::TypeWithFuncs {
+            descriptor: $crate::TypeDescriptor {
+                sql_name: concat!($type_name, "\0").as_bytes().as_ptr()
+                    as *const ::std::ffi::c_char,
+                persisted_length: $plen,
+                max_decode_buffer_length: $max_dec,
+                encode_vdf_name: concat!($type_name, "::from_string\0").as_bytes().as_ptr()
+                    as *const ::std::ffi::c_char,
+                decode_vdf_name: concat!($type_name, "::to_string\0").as_bytes().as_ptr()
+                    as *const ::std::ffi::c_char,
+                compare_vdf_name: concat!($type_name, "::compare\0").as_bytes().as_ptr()
+                    as *const ::std::ffi::c_char,
+                hash_vdf_name: __hash_vdf_name,
+                int_to_params_vdf_name: ::std::ptr::null(),
+                resolve_params_vdf_name: ::std::ptr::null(),
+                intrinsic_default_str: __default,
+                intrinsic_default_vdf_name: ::std::ptr::null(),
+                max_persisted_length: 0,
+            },
+            embedded_funcs: __embedded,
+        }
+    }};
+}
+
+/// Defines a parameterized custom SQL type. Like [`custom_type!`], but the
+/// persisted length is computed per-column from type parameters via
+/// `int_to_params` / `resolve_params` instead of being a fixed constant.
+#[macro_export]
+macro_rules! parameterized_type {
+    (
+        type_name: $type_name:literal,
+        max_persisted_length: $max_plen:expr,
+        max_decode_buffer_length: $max_dec:expr,
+        encode: $enc_fn:ident,
+        decode: $dec_fn:ident,
+        compare: $cmp_fn:ident,
+        int_to_params: $i2p_fn:ident,
+        resolve_params: $rp_fn:ident,
+        params_type: $p_ty:ty,
+        params_parse: $parse_fn:ident,
+        params_to_strings: $to_strings_fn:ident
+        $(, hash: $hash_fn:ident)?
+        $(, default: $default_str:literal)?
+        $(, intrinsic_default_fn: $default_fn:ident)?
+        $(,)?
+    ) => {{
+        // Stamp all VDFs (from_string/to_string/compare/hash + int_to_params/
+        // resolve_params/intrinsic_default) and collect their descriptors.
+        let mut __embedded = $crate::__vsql_type_vdfs_typed!(
+            type_name: $type_name,
+            encode: $enc_fn,
+            decode: $dec_fn,
+            compare: $cmp_fn,
+            int_to_params: $i2p_fn,
+            resolve_params: $rp_fn,
+            max_decode_buffer_length: $max_dec,
+            params_type: $p_ty,
+            params_parse: $parse_fn,
+            params_to_strings: $to_strings_fn
+            $(, hash: $hash_fn)?
+            $(, intrinsic_default_fn: $default_fn)?
+        );
+
+        #[allow(unused_mut)]
+        let mut __default: *const ::std::ffi::c_char = ::std::ptr::null();
+        $( __default = concat!($default_str, "\0").as_bytes().as_ptr()
+            as *const ::std::ffi::c_char; )?
+
+        #[allow(unused_mut)]
+        let mut __hash_vdf_name: *const ::std::ffi::c_char = ::std::ptr::null();
+        $( let _ = stringify!($hash_fn);
+           __hash_vdf_name = concat!($type_name, "::hash\0").as_bytes().as_ptr()
+            as *const ::std::ffi::c_char; )?
+
+        #[allow(unused_mut)]
+        let mut __intrinsic_default_vdf_name: *const ::std::ffi::c_char = ::std::ptr::null();
+        $( let _ = stringify!($default_fn);
+           __intrinsic_default_vdf_name = concat!($type_name, "::intrinsic_default\0").as_bytes().as_ptr()
+            as *const ::std::ffi::c_char; )?
+
+        $crate::TypeWithFuncs {
+            descriptor: $crate::TypeDescriptor {
+                sql_name: concat!($type_name, "\0").as_bytes().as_ptr()
+                    as *const ::std::ffi::c_char,
+                persisted_length: -1,
+                max_decode_buffer_length: $max_dec,
+                encode_vdf_name: concat!($type_name, "::from_string\0").as_bytes().as_ptr()
+                    as *const ::std::ffi::c_char,
+                decode_vdf_name: concat!($type_name, "::to_string\0").as_bytes().as_ptr()
+                    as *const ::std::ffi::c_char,
+                compare_vdf_name: concat!($type_name, "::compare\0").as_bytes().as_ptr()
+                    as *const ::std::ffi::c_char,
+                hash_vdf_name: __hash_vdf_name,
+                int_to_params_vdf_name: concat!($type_name, "::int_to_params\0").as_bytes().as_ptr()
+                    as *const ::std::ffi::c_char,
+                resolve_params_vdf_name: concat!($type_name, "::resolve_params\0").as_bytes().as_ptr()
+                    as *const ::std::ffi::c_char,
+                intrinsic_default_str: __default,
+                intrinsic_default_vdf_name: __intrinsic_default_vdf_name,
+                max_persisted_length: $max_plen,
+            },
+            embedded_funcs: __embedded,
+        }
+    }};
+}
+
+/// Rust unit testing:
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Params::parse: turns "k=v,k=v" into looked-up pairs ---
+
+    #[test]
+    fn params_parse_empty() {
+        // An empty params string means "no parameters".
+        let p = Params::parse("");
+        assert!(p.is_empty());
+        assert_eq!(p.get("anything"), None);
+    }
+
+    #[test]
+    fn params_parse_single() {
+        let p = Params::parse("width=5");
+        assert_eq!(p.len(), 1);
+        assert_eq!(p.get("width"), Some("5"));
+        assert_eq!(p.get("missing"), None);
+    }
+
+    #[test]
+    fn params_parse_multiple_preserves_order() {
+        let p = Params::parse("dimension=3,type=float");
+        assert_eq!(p.get("dimension"), Some("3"));
+        assert_eq!(p.get("type"), Some("float"));
+        // iter() yields pairs in the order they appeared.
+        assert_eq!(
+            p.iter().collect::<Vec<_>>(),
+            vec![("dimension", "3"), ("type", "float")]
+        );
+    }
+
+    #[test]
+    fn params_parse_entry_without_equals_has_empty_value() {
+        // Matches C++ SDK: a chunk that has no '='  -> key with "" value.
+        let p = Params::parse("a=1,bad,b=2");
+        assert_eq!(p.len(), 3);
+        assert_eq!(p.get("a"), Some("1"));
+        assert_eq!(p.get("bad"), Some(""));
+        assert_eq!(p.get("b"), Some("2"));
+    }
+
+    // -- write_inferred_params: serialize pairs into the server's buffer ---
+
+    #[test]
+    fn write_inferred_params_basic() {
+        let mut buf = [0u8; 64];
+        let pairs = vec![
+            ("dimension".to_string(), "3".to_string()),
+            ("type".to_string(), "float".to_string()),
+        ];
+        let (needed, _) = write_inferred_params(&mut buf, &pairs);
+        assert_eq!(&buf[..needed], b"dimension=3,type=float");
+    }
+
+    #[test]
+    fn write_inferred_params_sorts_keys() {
+        // Given out of order, output is sorted by key (canonical form).
+        let mut buf = [0u8; 64];
+        let pairs = vec![
+            ("type".to_string(), "float".to_string()),
+            ("dimension".to_string(), "3".to_string()),
+        ];
+        let (needed, _) = write_inferred_params(&mut buf, &pairs);
+        assert_eq!(&buf[..needed], b"dimension=3,type=float");
+    }
+
+    #[test]
+    fn write_inferred_params_overflow_reports_full_length() {
+        // Buffer too small: still report the FULL length needed (snprintf-style),
+        // and flag overflow so the server can retry with a bigger buffer.
+        let mut buf = [0u8; 5];
+        let pairs = vec![
+            ("dimension".to_string(), "3".to_string()),
+            ("type".to_string(), "float".to_string()),
+        ];
+        let (needed, overflow) = write_inferred_params(&mut buf, &pairs);
+        assert!(overflow);
+        assert_eq!(needed, 22); // "dimension=3,type=float" is 22 bytes
+    }
+
+    #[test]
+    fn write_inferred_params_empty() {
+        let mut buf = [0u8; 8];
+        let (needed, overflow) = write_inferred_params(&mut buf, &[]);
+        assert_eq!(needed, 0);
+        assert!(!overflow);
+    }
 }

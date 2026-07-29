@@ -1,0 +1,23 @@
+# Tests the vsql::status_var capability for the vsql_status_var example.
+# The extension declares two status variables (an INT counter + a DOUBLE gauge);
+# the server exposes them via SHOW STATUS as vsql_status_var.<name>, proving it
+# read our descriptor list from capability_config.
+
+SET PERSIST vsql_allow_preview_extensions = ON;
+
+INSTALL EXTENSION vsql_status_var;
+
+--echo # Both status variables appear with their defaults (requests=0, load=0.5)
+SHOW GLOBAL STATUS LIKE 'vsql_status_var.%';
+
+--echo # bump() increments the requests counter
+SELECT vsql_status_var.bump() AS first;
+SELECT vsql_status_var.bump() AS second;
+
+--echo # SHOW STATUS reflects the updated counter live
+SHOW GLOBAL STATUS LIKE 'vsql_status_var.%';
+
+UNINSTALL EXTENSION vsql_status_var;
+
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

@@ -1,0 +1,33 @@
+# ----------------------------------------------------------------------
+# Setup
+# Creating local configuration file for keyring component: component_keyring_file
+# Creating manifest file for current MySQL server instance
+# Re-starting mysql server with manifest file
+# ----------------------------------------------------------------------
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_keyring;
+# Store a secret, then read it back (store returns 0 = VEF_KEYRING_OK)
+SELECT vsql_keyring.keyring_store('vsql_test_key', NULL, 'my_secret_value');
+vsql_keyring.keyring_store('vsql_test_key', NULL, 'my_secret_value')
+0
+SELECT vsql_keyring.keyring_read('vsql_test_key', NULL);
+vsql_keyring.keyring_read('vsql_test_key', NULL)
+my_secret_value
+# A non-existent key reads back as NULL
+SELECT vsql_keyring.keyring_read('vsql_no_such_key', NULL) IS NULL;
+vsql_keyring.keyring_read('vsql_no_such_key', NULL) IS NULL
+1
+# A NULL data_id reads back as NULL
+SELECT vsql_keyring.keyring_read(NULL, NULL) IS NULL;
+vsql_keyring.keyring_read(NULL, NULL) IS NULL
+1
+UNINSTALL EXTENSION vsql_keyring;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;
+# ----------------------------------------------------------------------
+# Teardown
+# Removing manifest file for current MySQL server instance
+# Removing local keyring file for keyring component: component_keyring_file
+# Removing local configuration file for keyring component: component_keyring_file
+# Restarting server without the manifest file
+# ----------------------------------------------------------------------
