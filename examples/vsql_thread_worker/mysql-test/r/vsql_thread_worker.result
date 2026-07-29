@@ -1,0 +1,16 @@
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_thread_worker;
+# Before enabling, the worker has not ticked
+SELECT vsql_thread_worker.ticks() AS before_enable;
+before_enable
+0
+# Enable the worker; it starts ticking in the background
+SET GLOBAL vsql_thread_worker.ticker_enabled = ON;
+# The worker ran on its own thread — counter advanced past zero
+SELECT vsql_thread_worker.ticks() > 0 AS ticked;
+ticked
+1
+SET GLOBAL vsql_thread_worker.ticker_enabled = OFF;
+UNINSTALL EXTENSION vsql_thread_worker;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

@@ -1,0 +1,7 @@
+{
+  "name": "vsql_thread_worker",
+  "version": "0.1.0",
+  "description": "Example VillageSQL extension: exercises the vsql::preview::thread_worker capability",
+  "author": "VillageSQL Community",
+  "license": "GPL-2.0"
+}
