@@ -27,7 +27,7 @@ const VTABLE_HASH: &[u8] = b"ver-1\0";
 const CONFIG_HASH: &[u8] = b"ver-1\0";
 
 /// Clamp a `Duration` to the C ABI's `unsigned int` millisecond field,
-/// saturatnig instead of silently wrapping if it's implausibly large.
+/// saturating instead of silently wrapping if it's implausibly large.
 fn duration_to_ms(d: Duration) -> u32 {
     u32::try_from(d.as_millis()).unwrap_or(u32::MAX)
 }
@@ -47,25 +47,25 @@ pub struct NextWakeup {
     /// When to wake next. `None` = keep the current interval unchanged.
     /// A zero-length `Duration` also collapses to "no change": the C ABI
     /// reserves `0` for that, so an instant wakeup can't be expressed.
-    pub interval: Option<Duration>,
+    pub sleep_interval: Option<Duration>,
     /// FD to watch: `> 0` watch, `-1` clear, `0` = keep current.
     pub poll_fd: i32,
 }
 
 impl NextWakeup {
-    /// Keep interval and poll fd unchanged.
+    /// Keep sleep interval and poll fd unchanged.
     #[must_use]
     pub const fn unchanged() -> Self {
         Self {
-            interval: None,
+            sleep_interval: None,
             poll_fd: 0,
         }
     }
-    /// Wake again after `interval` (poll fd unchanged).
+    /// Wake again after `sleep_interval` (poll fd unchanged).
     #[must_use]
-    pub const fn after(interval: Duration) -> Self {
+    pub const fn after(sleep_interval: Duration) -> Self {
         Self {
-            interval: Some(interval),
+            sleep_interval: Some(sleep_interval),
             poll_fd: 0,
         }
     }
@@ -74,7 +74,7 @@ impl NextWakeup {
 impl From<NextWakeup> for vef_next_wakeup_t {
     fn from(n: NextWakeup) -> Self {
         Self {
-            sleep_ms: n.interval.map_or(0, duration_to_ms),
+            sleep_ms: n.sleep_interval.map_or(0, duration_to_ms),
             poll_fd: n.poll_fd,
         }
     }
@@ -93,7 +93,7 @@ pub type WorkFn = fn(WakeupReason, ThreadHandle) -> NextWakeup;
 pub struct ThreadWorkerCapability {
     abi_: AtomicPtr<vef_preview_thread_worker_t>,
     work_fn: WorkFn,
-    interval: Duration,
+    sleep_interval: Duration,
     suffix: &'static CStr,
     var_name: Option<&'static CStr>,
 }
@@ -110,13 +110,13 @@ impl ThreadWorkerCapability {
     pub const fn new(
         work_fn: WorkFn,
         suffix: &'static CStr,
-        interval: Duration,
+        sleep_interval: Duration,
         var_name: Option<&'static CStr>,
     ) -> Self {
         Self {
             abi_: AtomicPtr::new(std::ptr::null_mut()),
             work_fn,
-            interval,
+            sleep_interval,
             suffix,
             var_name,
         }
@@ -133,7 +133,7 @@ impl Capability for &'static ThreadWorkerCapability {
             // Pointer back to this 'static capability, which the trampoline
             // recovers to reach work_fn.
             arg: std::ptr::from_ref(self).cast::<c_void>().cast_mut(),
-            sleep_ms: duration_to_ms(self.interval),
+            sleep_ms: duration_to_ms(self.sleep_interval),
             suffix: self.suffix.as_ptr(),
             // Option<&CStr> -> pointer, or null when None (server uses the default name).
             var_name: self.var_name.map_or(std::ptr::null(), CStr::as_ptr),
