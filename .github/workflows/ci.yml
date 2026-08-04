@@ -122,14 +122,18 @@ jobs:
             dir: tests/sdk_coverage
           - name: vsql_keyring
             dir: examples/vsql_keyring
-          - name: vsql_rot13
-            dir: examples/vsql_rot13
+          - name: vsql_ping
+            dir: examples/vsql_ping
           - name: vsql_rational
             dir: examples/vsql_rational
+          - name: vsql_rot13
+            dir: examples/vsql_rot13
+          - name: vsql_status_var
+            dir: examples/vsql_status_var
+          - name: vsql_sys_var
+            dir: examples/vsql_sys_var
           - name: vsql_thread_worker
             dir: examples/vsql_thread_worker
-          - name: sdk_coverage
-            dir: tests/sdk_coverage
 
     steps:
       - name: Checkout
