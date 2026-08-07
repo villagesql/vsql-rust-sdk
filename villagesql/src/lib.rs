@@ -636,7 +636,7 @@ pub unsafe fn dispatch_vdf(
 /// Prerun runner: wrap the raw slots and call the author's setup fn.
 ///
 /// # Safety
-/// `args` and `result` must be valid for the duration of the call. 
+/// `args` and `result` must be valid for the duration of the call.
 pub unsafe fn dispatch_prerun<T>(
     f: fn(PrerunArgs, PrerunResult<T>),
     args: *mut vef_prerun_args_t,
