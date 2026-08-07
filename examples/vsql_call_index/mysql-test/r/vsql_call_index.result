@@ -1,0 +1,13 @@
+INSTALL EXTENSION vsql_call_index;
+CREATE TABLE t (id INT);
+INSERT INTO t VALUES (10), (20), (30);
+# 3 rows -> counter yields 1 + 2 + 3 = 6 (one call per row, incrementing state)
+SELECT SUM(vsql_call_index.call_index()) AS total FROM t;
+total
+6
+# Re-running gives 6 again, not 15. Proves counter wasn't leaked between rounds.
+SELECT SUM(vsql_call_index.call_index()) AS total FROM t;
+total
+6
+DROP TABLE t;
+UNINSTALL EXTENSION vsql_call_index;

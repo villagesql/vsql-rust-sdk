@@ -120,6 +120,8 @@ jobs:
         include:
           - name: sdk_coverage
             dir: tests/sdk_coverage
+          - name: vsql_call_index
+            dir: examples/vsql_call_index
           - name: vsql_keyring
             dir: examples/vsql_keyring
           - name: vsql_ping

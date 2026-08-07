@@ -1,0 +1,16 @@
+# Tests prerun/postrun state: call_index() allocates a counter in prerun the row
+# fn increments it per call, and postrun frees it. Proves stateful VDFs work end-to-end.
+
+INSTALL EXTENSION vsql_call_index;
+
+CREATE TABLE t (id INT);
+INSERT INTO t VALUES (10), (20), (30);
+
+--echo # 3 rows -> counter yields 1 + 2 + 3 = 6 (one call per row, incrementing state)
+SELECT SUM(vsql_call_index.call_index()) AS total FROM t;
+
+--echo # Re-running gives 6 again, not 15. Proves counter wasn't leaked between rounds.
+SELECT SUM(vsql_call_index.call_index()) AS total FROM t;
+
+DROP TABLE t;
+UNINSTALL EXTENSION vsql_call_index;
