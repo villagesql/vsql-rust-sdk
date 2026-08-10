@@ -582,19 +582,11 @@ unsafe fn reclaim_state<T>(raw: *mut c_void) {
     drop(Box::from_raw(raw.cast::<T>()));
 }
 
-/// Convert raw Protocol-3 VDF arguments into a `&[InValue]` slice and call `f`.
+/// Helper to convert raw Protocol-3 VDF arguments into a `&[InValue]` slice.
 ///
 /// # Safety
 /// `args` and `result` must be valid for the duration of the call.
-pub unsafe fn dispatch_vdf(
-    f: fn(&[InValue]) -> VdfReturn,
-    args: *mut vef_vdf_args_t,
-    result: *mut vef_vdf_result_t,
-) {
-    let args = &*args;
-    let result = &mut *result;
-
-    // Protocol 3: values is an array of *mut vef_invalue_t pointers.
+unsafe fn read_in_values(args: &vef_vdf_args_t) -> Vec<InValue<'_>> {
     let value_count = args.value_count as usize;
     let raw_vals = std::slice::from_raw_parts(args.__bindgen_anon_1.values, value_count);
 
@@ -629,8 +621,19 @@ pub unsafe fn dispatch_vdf(
         };
         in_values.push(iv);
     }
-
-    write_result(f(&in_values), result);
+    in_values
+}
+/// Convert raw Protocol-3 VDF arguments into a `&[InValue]` slice and call `f`.
+///
+/// # Safety
+/// `args` and `result` must be valid for the duration of the call.
+pub unsafe fn dispatch_vdf(
+    f: fn(&[InValue]) -> VdfReturn,
+    args: *mut vef_vdf_args_t,
+    result: *mut vef_vdf_result_t,
+) {
+    let in_values = read_in_values(&*args);
+    write_result(f(&in_values), &mut *result);
 }
 
 /// Prerun runner: wrap the raw slots and call the author's setup fn.
@@ -649,17 +652,22 @@ pub unsafe fn dispatch_prerun<T>(
 }
 
 /// Row runner for functions that own per-statement state. Borrows the state
-/// stashed by prerun, then calls the author's row fn with it.
+/// stashed by prerun and reads the row's values, then calls the author's row fn
+/// with both.
 ///
 /// # Safety
 /// `args` and `result` are valid because state was set by a prior prerun.
+/// The state must have been set by a prior prerun, and `T` must watch that
+/// state's type.
 pub unsafe fn dispatch_vdf_with_state<T>(
-    f: fn(&mut T) -> VdfReturn,
+    f: fn(&mut T, &[InValue]) -> VdfReturn,
     args: *mut vef_vdf_args_t,
     result: *mut vef_vdf_result_t,
 ) {
-    let state = borrow_state::<T>((*args).user_data);
-    write_result(f(state), &mut *result);
+    let args = &*args;
+    let state = borrow_state::<T>(args.user_data);
+    let in_values = read_in_values(args);
+    write_result(f(state, &in_values), &mut *result);
 }
 
 /// Postrun runner: reclaim the state and drop the state allocated in prerun.

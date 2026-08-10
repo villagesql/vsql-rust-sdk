@@ -10,4 +10,22 @@ SELECT SUM(vsql_call_index.call_index()) AS total FROM t;
 total
 6
 DROP TABLE t;
+# running_concat uses BOTH state (accumulator) and each row's value, and
+# needs a result buffer larger than the 256-byte default (via prerun's
+# request_buffer_size). MAX(LENGTH(...)) is order-independent and > 256,
+# so success proves the larger buffer was actually applied.
+CREATE TABLE words (w VARCHAR(64));
+INSERT INTO words VALUES
+('0123456789012345678901234567890123456789'),
+('0123456789012345678901234567890123456789'),
+('0123456789012345678901234567890123456789'),
+('0123456789012345678901234567890123456789'),
+('0123456789012345678901234567890123456789'),
+('0123456789012345678901234567890123456789'),
+('0123456789012345678901234567890123456789'),
+('0123456789012345678901234567890123456789');
+SELECT MAX(LENGTH(vsql_call_index.running_concat(w))) AS max_len FROM words;
+max_len
+320
+DROP TABLE words;
 UNINSTALL EXTENSION vsql_call_index;
