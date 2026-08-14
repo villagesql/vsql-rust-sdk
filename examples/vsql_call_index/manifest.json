@@ -1,0 +1,7 @@
+{
+    "name": "vsql_call_index",
+    "version": "0.1.0",
+    "description": "Example VillageSQL extension: a stateful VDF that counts calls via prerun/postrun",
+    "author": "VillageSQL Community",
+    "license": "GPL-2.0"
+}

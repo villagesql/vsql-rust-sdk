@@ -13,11 +13,14 @@ pub use paste;
 pub use villagesql_sys as sys;
 pub mod preview;
 
+use core::ffi::c_void;
 use std::collections::HashMap;
 use std::ffi::c_char;
+use std::marker::PhantomData;
 use std::sync::{OnceLock, RwLock};
 use villagesql_sys::{
-    vef_func_desc_t, vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t, vef_required_capability_t,
+    vef_func_desc_t, vef_postrun_args_t, vef_prerun_args_t, vef_prerun_result_t,
+    vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t, vef_required_capability_t,
     vef_return_value_type_t_VEF_RESULT_ERROR, vef_return_value_type_t_VEF_RESULT_NULL,
     vef_return_value_type_t_VEF_RESULT_VALUE, vef_return_value_type_t_VEF_RESULT_WARNING,
     vef_signature_t, vef_type_desc_t, vef_type_id_VEF_TYPE_CUSTOM, vef_type_id_VEF_TYPE_INT,
@@ -443,6 +446,8 @@ pub struct FuncDescriptor {
     ),
     pub buffer_size: usize,
     pub deterministic: bool,
+    pub prerun: villagesql_sys::vef_prerun_func_t,
+    pub postrun: villagesql_sys::vef_postrun_func_t,
 }
 
 unsafe impl Send for FuncDescriptor {}
@@ -492,21 +497,96 @@ pub struct TypeWithFuncs {
 unsafe impl Send for TypeWithFuncs {}
 unsafe impl Sync for TypeWithFuncs {}
 
+// Prerun / Postrun
+
+// TODO(villagesql-rust): need to finish up prerun/postrun args for varargs.
+pub struct PrerunArgs<'a> {
+    inner: &'a villagesql_sys::vef_prerun_args_t,
+}
+
+impl PrerunArgs<'_> {
+    pub(crate) unsafe fn from_raw(raw: *const villagesql_sys::vef_prerun_args_t) -> Self {
+        Self { inner: &*raw }
+    }
+
+    /// Number of arguments each row will receive.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.arg_count as usize
+    }
+
+    /// True if the function was called with no arguments.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Handle a prerun uses to set up a statement: `set_state`, `request_buffer_size`,
+/// or `error`. `T` is the state type, matched to the `&mut T` the row handler
+/// gets. The compiler ensures the types match up.
+pub struct PrerunResult<'a, T> {
+    inner: &'a mut villagesql_sys::vef_prerun_result_t,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> PrerunResult<'_, T> {
+    pub(crate) unsafe fn from_raw(raw: *mut villagesql_sys::vef_prerun_result_t) -> Self {
+        Self {
+            inner: &mut *raw,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Allocate the per-statement state and hand it to the server.
+    /// Consumes `self` instead of borrowing so you can't accidentally call it twice.
+    pub fn set_state(self, state: T) {
+        self.inner.user_data = Box::into_raw(Box::new(state)).cast::<c_void>();
+    }
+
+    /// Ask the server for a specific result-buffer size.
+    pub fn request_buffer_size(&mut self, n: usize) {
+        self.inner.result_buffer_size = n;
+    }
+
+    /// Fail the whole statement with a message.
+    pub fn error(self, msg: &str) {
+        self.inner.type_ = vef_return_value_type_t_VEF_RESULT_ERROR;
+        unsafe {
+            write_error_msg(msg.as_bytes(), self.inner.error_msg);
+        }
+    }
+}
+
 // ── Internal runtime helpers ──────────────────────────────────────────────────
 
-/// Convert raw Protocol-3 VDF arguments into a `&[InValue]` slice and call `f`.
+/// Borrow the state stashed by `set_state`, without taking ownership.
+///
+/// # Safety
+/// `raw` must be the pointer produced by `set_state` for this statement,
+/// still alive (postrun hasn't run yet), with no other live borrow of it.
+unsafe fn borrow_state<'a, T>(raw: *mut c_void) -> &'a mut T {
+    debug_assert!(!raw.is_null(), "state pointer was null in row handler");
+    &mut *(raw.cast::<T>())
+}
+
+/// Reclaim and drop the boxed state, freeing its memory.
+///
+/// # Safety
+/// `raw` must be a pointer from `set_state` that hasn't been reclaimed yet.
+/// Call exactly once, from postrun.
+unsafe fn reclaim_state<T>(raw: *mut c_void) {
+    if raw.is_null() {
+        return;
+    }
+    drop(Box::from_raw(raw.cast::<T>()));
+}
+
+/// Helper to convert raw Protocol-3 VDF arguments into a `&[InValue]` slice.
 ///
 /// # Safety
 /// `args` and `result` must be valid for the duration of the call.
-pub unsafe fn dispatch_vdf(
-    f: fn(&[InValue]) -> VdfReturn,
-    args: *mut vef_vdf_args_t,
-    result: *mut vef_vdf_result_t,
-) {
-    let args = &*args;
-    let result = &mut *result;
-
-    // Protocol 3: values is an array of *mut vef_invalue_t pointers.
+unsafe fn read_in_values(args: &vef_vdf_args_t) -> Vec<InValue<'_>> {
     let value_count = args.value_count as usize;
     let raw_vals = std::slice::from_raw_parts(args.__bindgen_anon_1.values, value_count);
 
@@ -541,8 +621,61 @@ pub unsafe fn dispatch_vdf(
         };
         in_values.push(iv);
     }
+    in_values
+}
+/// Convert raw Protocol-3 VDF arguments into a `&[InValue]` slice and call `f`.
+///
+/// # Safety
+/// `args` and `result` must be valid for the duration of the call.
+pub unsafe fn dispatch_vdf(
+    f: fn(&[InValue]) -> VdfReturn,
+    args: *mut vef_vdf_args_t,
+    result: *mut vef_vdf_result_t,
+) {
+    let in_values = read_in_values(&*args);
+    write_result(f(&in_values), &mut *result);
+}
 
-    write_result(f(&in_values), result);
+/// Prerun runner: wrap the raw slots and call the author's setup fn.
+///
+/// # Safety
+/// `args` and `result` must be valid for the duration of the call.
+pub unsafe fn dispatch_prerun<T>(
+    f: fn(PrerunArgs, PrerunResult<T>),
+    args: *mut vef_prerun_args_t,
+    result: *mut vef_prerun_result_t,
+) {
+    f(
+        PrerunArgs::from_raw(args),
+        PrerunResult::<T>::from_raw(result),
+    );
+}
+
+/// Row runner for functions that own per-statement state. Borrows the state
+/// stashed by prerun and reads the row's values, then calls the author's row fn
+/// with both.
+///
+/// # Safety
+/// `args` and `result` are valid because state was set by a prior prerun.
+/// The state must have been set by a prior prerun, and `T` must watch that
+/// state's type.
+pub unsafe fn dispatch_vdf_with_state<T>(
+    f: fn(&mut T, &[InValue]) -> VdfReturn,
+    args: *mut vef_vdf_args_t,
+    result: *mut vef_vdf_result_t,
+) {
+    let args = &*args;
+    let state = borrow_state::<T>(args.user_data);
+    let in_values = read_in_values(args);
+    write_result(f(state, &in_values), &mut *result);
+}
+
+/// Postrun runner: reclaim the state and drop the state allocated in prerun.
+///
+/// # Safety
+/// `args` is valid (set by prerun). `T` matches what prerun set.
+pub unsafe fn dispatch_postrun<T>(args: *mut vef_postrun_args_t) {
+    reclaim_state::<T>((*args).user_data);
 }
 
 /// Dispatch a parameterized type's `from_string` (encode), including the
@@ -766,8 +899,8 @@ unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
         name: d.sql_name,
         signature: sig,
         vdf: Some(d.trampoline),
-        prerun: None,
-        postrun: None,
+        prerun: d.prerun,
+        postrun: d.postrun,
         buffer_size: d.buffer_size,
         deterministic: d.deterministic,
         clear: None,
@@ -1005,6 +1138,56 @@ macro_rules! extension {
 /// ```
 #[macro_export]
 macro_rules! func {
+    // Prerun form: a function that owns per-statement state (setup in prerun,
+    // auto-freed in postrun). `state:` names the state type. `prerun:` names the setup fn.
+    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
+     state: $state:ty,  prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
+        $crate::paste::paste! {
+            // row trampoline borrows the state.
+            unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
+            }
+            // prerun trampoline
+            unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_prerun_args_t,
+                result: *mut $crate::sys::vef_prerun_result_t,
+            ) {
+                $crate::dispatch_prerun::<$state>($prerun, args, result);
+            }
+            // postrun trampoline. auto-drops the state.
+            unsafe extern "C" fn [< __vsql_postrun_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_postrun_args_t,
+                _result: *mut $crate::sys::vef_postrun_result_t,
+            ) {
+                $crate::dispatch_postrun::<$state>(args);
+            }
+            static [< __VSQL_PARAMS_ $impl_fn:upper >]: &[$crate::Type] = &[$($param),*];
+            $crate::FuncDescriptor {
+                sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: [< __VSQL_PARAMS_ $impl_fn:upper >],
+                returns: $ret,
+                trampoline: [< __vsql_trampoline_ $impl_fn >],
+                buffer_size: $bs,
+                deterministic: $det,
+                prerun: Some([< __vsql_prerun_ $impl_fn >]),
+                postrun: Some([< __vsql_postrun_ $impl_fn >]),
+            }
+        }
+     }};
+
+    // Prerun form, defaults: server buffer size, non-deterministic.
+    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
+     state: $state:ty, prerun: $prerun:ident) => {
+        $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
+            state: $state, prerun: $prerun, buffer_size: 0, deterministic: false)
+    };
     // Full form: declare the result-buffer size and determinism. `buffer_size`
     // is a plain value (ideally computed from data, not a magic literal); 0
     // uses the server default (256 bytes).
@@ -1027,6 +1210,8 @@ macro_rules! func {
                 trampoline: [< __vsql_trampoline_ $impl_fn >],
                 buffer_size: $bs,
                 deterministic: $det,
+                prerun: None,
+                postrun: None,
             }
         }
     }};
@@ -1178,6 +1363,8 @@ macro_rules! __vsql_type_vdfs {
                 trampoline: [< __vsql_trampoline_from_string_ $enc_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                prerun: None,
+                postrun: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::to_string\0").as_bytes().as_ptr()
@@ -1187,6 +1374,8 @@ macro_rules! __vsql_type_vdfs {
                 trampoline: [< __vsql_trampoline_to_string_ $dec_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                prerun: None,
+                postrun: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::compare\0").as_bytes().as_ptr()
@@ -1196,6 +1385,8 @@ macro_rules! __vsql_type_vdfs {
                 trampoline: [< __vsql_trampoline_compare_ $cmp_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                prerun: None,
+                postrun: None,
             });
             $(
                 __embedded.push($crate::FuncDescriptor {
@@ -1206,6 +1397,8 @@ macro_rules! __vsql_type_vdfs {
                     trampoline: [< __vsql_trampoline_hash_ $hash_fn >],
                     buffer_size: 0,
                     deterministic: true,
+                    prerun: None,
+                    postrun: None,
                 });
             )?
 
@@ -1416,6 +1609,8 @@ macro_rules! __vsql_type_vdfs_typed {
                 trampoline: [< __vsql_trampoline_from_string_ $enc_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                prerun: None,
+                postrun: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::to_string\0").as_bytes().as_ptr()
@@ -1425,6 +1620,8 @@ macro_rules! __vsql_type_vdfs_typed {
                 trampoline: [< __vsql_trampoline_to_string_ $dec_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                prerun: None,
+                postrun: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::compare\0").as_bytes().as_ptr()
@@ -1434,6 +1631,8 @@ macro_rules! __vsql_type_vdfs_typed {
                 trampoline: [< __vsql_trampoline_compare_ $cmp_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                prerun: None,
+                postrun: None,
             });
             $(
                 __embedded.push($crate::FuncDescriptor {
@@ -1444,6 +1643,8 @@ macro_rules! __vsql_type_vdfs_typed {
                     trampoline: [< __vsql_trampoline_hash_ $hash_fn >],
                     buffer_size: 0,
                     deterministic: true,
+                    prerun: None,
+                    postrun: None,
                 });
             )?
             __embedded.push($crate::FuncDescriptor {
@@ -1454,6 +1655,8 @@ macro_rules! __vsql_type_vdfs_typed {
                 trampoline: [< __vsql_trampoline_int_to_params_ $i2p_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                prerun: None,
+                postrun: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::resolve_params\0").as_bytes().as_ptr()
@@ -1463,6 +1666,8 @@ macro_rules! __vsql_type_vdfs_typed {
                 trampoline: [< __vsql_trampoline_resolve_params_ $rp_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                prerun: None,
+                postrun: None,
             });
             $(
                 __embedded.push($crate::FuncDescriptor {
@@ -1473,6 +1678,8 @@ macro_rules! __vsql_type_vdfs_typed {
                     trampoline: [< __vsql_trampoline_intrinsic_default_ $default_fn >],
                     buffer_size: $max_dec,
                     deterministic: true,
+                    prerun: None,
+                    postrun: None,
                 });
             )?
 
