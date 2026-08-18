@@ -2,6 +2,10 @@
 
 Write custom SQL functions (VDFs) for VillageSQL in safe Rust. The SDK handles all FFI marshaling so you work entirely in ordinary Rust types.
 
+**Docs:** [VillageSQL documentation](https://villagesql.com/docs) ·
+[Writing Rust extensions](https://villagesql.com/docs/guides/rust-extensions) ·
+[Install VillageSQL Server](https://villagesql.com/install)
+
 ## Crates
 
 | Crate | Description |
