@@ -1,0 +1,12 @@
+[package]
+name = "vsql_varargs"
+version = "0.1.0"
+edition = "2021"
+description = "Example VillageSQL extension: a varargs VDF that joins a variable number of string arguments"
+license = "GPL-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+villagesql = { path = "../../villagesql" }
