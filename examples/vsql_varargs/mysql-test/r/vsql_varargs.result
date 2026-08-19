@@ -1,0 +1,71 @@
+INSTALL EXTENSION vsql_varargs;
+# Two arguments: joined with ', ", prefixed with the per-statement call count (#1).
+SELECT vsql_varargs.str_join('alpha', 'beta');
+vsql_varargs.str_join('alpha', 'beta')
+#1: alpha, beta
+# Four arguments: same function, different arity.
+SELECT vsql_varargs.str_join('a', 'b', 'c', 'd');
+vsql_varargs.str_join('a', 'b', 'c', 'd')
+#1: a, b, c, d
+# Per-statement state: the call counter climbs across rows in one statement (#1..#3).
+CREATE TABLE t (x VARCHAR(16), y VARCHAR(16));
+INSERT INTO t VALUES ('1a', '1b'), ('2a', '2b'), ('3a', '3b');
+SELECT vsql_varargs.str_join(x, y) AS joined FROM t ORDER BY x;
+joined
+#1: 1a, 1b
+#2: 2a, 2b
+#3: 3a, 3b
+# NULL argument: a string column carrying NULL yields NULL for that row.
+INSERT INTO t VALUES ('4a', NULL);
+SELECT vsql_varargs.str_join(x, y) AS joined FROM t ORDER BY x;
+joined
+#1: 1a, 1b
+#2: 2a, 2b
+#3: 3a, 3b
+NULL
+# Zero arguments: prerun rejects.
+SELECT vsql_varargs.str_join();
+ERROR HY000: Can't initialize function 'str_join'; str_join requires at least one argument
+# Wrong type: prerun rejects a non-string argument.
+SELECT vsql_varargs.str_join('ok', 123);
+ERROR HY000: Can't initialize function 'str_join'; str_join: every argument must be a string
+DROP TABLE t;
+# Bare varargs (arg_count): no prerun, no validation, accepts zero args.
+SELECT vsql_varargs.arg_count();
+vsql_varargs.arg_count()
+0
+SELECT vsql_varargs.arg_count('a', 'b', 'c');
+vsql_varargs.arg_count('a', 'b', 'c')
+3
+SELECT vsql_varargs.arg_count(1, 2.5, 'mix');
+vsql_varargs.arg_count(1, 2.5, 'mix')
+3
+# Prerun-only varargs (describe): a mix of INT/REAL/STRING in one call.
+SELECT vsql_varargs.describe(42, 3.14e0, 'hello');
+vsql_varargs.describe(42, 3.14e0, 'hello')
+int:42, real:3.14, str:hello
+# describe rejects zero args (prerun validation).
+SELECT vsql_varargs.describe();
+ERROR HY000: Can't initialize function 'describe'; describe requires at least one argument
+# describe rejects a custom-typed argument — scalars only.
+SELECT vsql_varargs.describe(point2d::from_string('1,2'));
+ERROR HY000: Can't initialize function 'describe'; describe: arguments must be INT, REAL, or STRING
+# Custom type point2d: string values round-trip through encode/decode.
+CREATE TABLE pts (id INT, p point2d);
+INSERT INTO pts VALUES (1, '2,3'), (2, '-4,5');
+SELECT id, p FROM pts ORDER BY id;
+id	p
+1	2,3
+2	-4,5
+DROP TABLE pts;
+# Custom-typed varargs (point_path): join point2d values into a path.
+SELECT vsql_varargs.point_path(point2d::from_string('0,0'), point2d::from_string('1,2'), point2d::from_string('3,5'));
+vsql_varargs.point_path(point2d::from_string('0,0'), point2d::from_string('1,2'), point2d::from_string('3,5'))
+(0,0) -> (1,2) -> (3,5)
+SELECT vsql_varargs.point_path(point2d::from_string('7,7'));
+vsql_varargs.point_path(point2d::from_string('7,7'))
+(7,7)
+# point_path rejects a non-point2d (plain string) argument via prerun.
+SELECT vsql_varargs.point_path('1,2');
+ERROR HY000: Can't initialize function 'point_path'; point_path: every argument must be a point2d
+UNINSTALL EXTENSION vsql_varargs;
