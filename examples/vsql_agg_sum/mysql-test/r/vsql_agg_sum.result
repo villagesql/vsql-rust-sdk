@@ -6,27 +6,34 @@ SELECT vsql_agg_sum.agg_sum(val) AS mine, SUM(val) AS builtin FROM t;
 mine	builtin
 630	630
 # GROUP BY: clear must reset per group. Group 1 = 30, group 2 = 600.
-# If clear fired only once, group 2 would carry group 1 -> 630, and this fails.
 SELECT grp, vsql_agg_sum.agg_sum(val) AS mine, SUM(val) AS builtin FROM t GROUP BY grp ORDER BY grp;
 grp	mine	builtin
 1	30	30
 2	600	600
+# Per-group NULL: group 3 is all-NULL, so it must be NULL (not 0).
+# Proves clear resets the `seen` flag between groups.
+INSERT INTO t VALUES (3, NULL), (3, NULL);
+SELECT grp, vsql_agg_sum.agg_sum(val) AS mine, SUM(val) AS builtin FROM t GROUP BY grp ORDER BY grp;
+grp	mine	builtin
+1	30	30
+2	600	600
+3	NULL	NULL
+DROP TABLE t;
 # Mixed NULLs: agg_sum must skip NULLs like built-in SUM (10+20=30).
 CREATE TABLE n (val INT);
 INSERT INTO n VALUES (10), (NULL), (20);
-SELECT vsql_agg_sum.agg_sum(val) as MINE, SUM(val) AS builtin FROM n;
-MINE	builtin
+SELECT vsql_agg_sum.agg_sum(val) AS mine, SUM(val) AS builtin FROM n;
+mine	builtin
 30	30
-# Empty set: built-in SUM returns NULL over zero rows. agg_sum should match.
+# Empty set: built-in SUM returns NULL over zero rows.
 SELECT vsql_agg_sum.agg_sum(val) AS mine, SUM(val) AS builtin FROM n WHERE 1=0;
 mine	builtin
 NULL	NULL
-# All-NULL group: built-in SUM returns NULL when every value is NULL.
+# All-NULL group: should return NULL.
 DELETE FROM n;
 INSERT INTO n VALUES (NULL), (NULL);
 SELECT vsql_agg_sum.agg_sum(val) AS mine, SUM(val) AS builtin FROM n;
 mine	builtin
 NULL	NULL
 DROP TABLE n;
-DROP TABLE t;
 UNINSTALL EXTENSION vsql_agg_sum;
