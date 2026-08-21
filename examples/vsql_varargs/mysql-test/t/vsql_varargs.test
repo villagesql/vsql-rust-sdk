@@ -1,0 +1,60 @@
+# Tests varargs VDFs: str_join takes any number of STRING arguments and joins them.
+# The server does NO argument validation for varargs. The prerun hook owns it. This
+# proves variable arity, prerun rejection of zero-arg and wrong type calls,
+# per-statement state (a call counter), and NULL handling.
+
+INSTALL EXTENSION vsql_varargs;
+
+--echo # Two arguments: joined with ', ", prefixed with the per-statement call count (#1).
+SELECT vsql_varargs.str_join('alpha', 'beta');
+
+--echo # Four arguments: same function, different arity.
+SELECT vsql_varargs.str_join('a', 'b', 'c', 'd');
+
+--echo # Per-statement state: the call counter climbs across rows in one statement (#1..#3).
+CREATE TABLE t (x VARCHAR(16), y VARCHAR(16));
+INSERT INTO t VALUES ('1a', '1b'), ('2a', '2b'), ('3a', '3b');
+SELECT vsql_varargs.str_join(x, y) AS joined FROM t ORDER BY x;
+
+--echo # NULL argument: a string column carrying NULL yields NULL for that row.
+INSERT INTO t VALUES ('4a', NULL);
+SELECT vsql_varargs.str_join(x, y) AS joined FROM t ORDER BY x;
+
+--echo # Zero arguments: prerun rejects.
+--error ER_CANT_INITIALIZE_UDF
+SELECT vsql_varargs.str_join();
+
+--echo # Wrong type: prerun rejects a non-string argument.
+--error ER_CANT_INITIALIZE_UDF
+SELECT vsql_varargs.str_join('ok', 123);
+
+DROP TABLE t;
+
+--echo # Bare varargs (arg_count): no prerun, no validation, accepts zero args.
+SELECT vsql_varargs.arg_count();
+SELECT vsql_varargs.arg_count('a', 'b', 'c');
+SELECT vsql_varargs.arg_count(1, 2.5, 'mix');
+
+--echo # Prerun-only varargs (describe): a mix of INT/REAL/STRING in one call.
+SELECT vsql_varargs.describe(42, 3.14e0, 'hello');
+--echo # describe rejects zero args (prerun validation).
+--error ER_CANT_INITIALIZE_UDF
+SELECT vsql_varargs.describe();
+--echo # describe rejects a custom-typed argument — scalars only.
+--error ER_CANT_INITIALIZE_UDF
+SELECT vsql_varargs.describe(point2d::from_string('1,2'));
+
+--echo # Custom type point2d: string values round-trip through encode/decode.
+CREATE TABLE pts (id INT, p point2d);
+INSERT INTO pts VALUES (1, '2,3'), (2, '-4,5');
+SELECT id, p FROM pts ORDER BY id;
+DROP TABLE pts;
+
+--echo # Custom-typed varargs (point_path): join point2d values into a path.
+SELECT vsql_varargs.point_path(point2d::from_string('0,0'), point2d::from_string('1,2'), point2d::from_string('3,5'));
+SELECT vsql_varargs.point_path(point2d::from_string('7,7'));
+--echo # point_path rejects a non-point2d (plain string) argument via prerun.
+--error ER_CANT_INITIALIZE_UDF
+SELECT vsql_varargs.point_path('1,2');
+
+UNINSTALL EXTENSION vsql_varargs;

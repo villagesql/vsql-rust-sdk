@@ -446,6 +446,7 @@ pub struct FuncDescriptor {
     ),
     pub buffer_size: usize,
     pub deterministic: bool,
+    pub varargs: bool,
     pub prerun: villagesql_sys::vef_prerun_func_t,
     pub postrun: villagesql_sys::vef_postrun_func_t,
     pub clear: villagesql_sys::vef_vdf_clear_func_t,
@@ -500,13 +501,12 @@ unsafe impl Send for TypeWithFuncs {}
 unsafe impl Sync for TypeWithFuncs {}
 
 // Prerun / Postrun
-
-// TODO(villagesql-rust): need to finish up prerun/postrun args for varargs.
+#[derive(Clone, Copy)]
 pub struct PrerunArgs<'a> {
     inner: &'a villagesql_sys::vef_prerun_args_t,
 }
 
-impl PrerunArgs<'_> {
+impl<'a> PrerunArgs<'a> {
     pub(crate) unsafe fn from_raw(raw: *const villagesql_sys::vef_prerun_args_t) -> Self {
         Self { inner: &*raw }
     }
@@ -521,6 +521,52 @@ impl PrerunArgs<'_> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The type of argument `i`, or `None` if `i` is out of range.
+    #[must_use]
+    pub fn type_at(&self, i: usize) -> Option<ArgType<'a>> {
+        if i >= self.len() {
+            return None;
+        }
+        // SAFETY: the server guarantees `arg_types` points to `arg_count` valid entries.
+        let types = unsafe { std::slice::from_raw_parts(self.inner.arg_types, self.len()) };
+        Some(ArgType { inner: &types[i] })
+    }
+}
+
+/// The type of one argument, as seen at prerun time. A borrowed, read-only view.
+pub struct ArgType<'a> {
+    inner: &'a villagesql_sys::vef_type_t,
+}
+
+impl ArgType<'_> {
+    #[must_use]
+    pub fn is_str(&self) -> bool {
+        self.inner.id == villagesql_sys::vef_type_id_VEF_TYPE_STRING
+    }
+    #[must_use]
+    pub fn is_real(&self) -> bool {
+        self.inner.id == villagesql_sys::vef_type_id_VEF_TYPE_REAL
+    }
+    #[must_use]
+    pub fn is_int(&self) -> bool {
+        self.inner.id == villagesql_sys::vef_type_id_VEF_TYPE_INT
+    }
+    #[must_use]
+    pub fn is_custom(&self) -> bool {
+        self.inner.id == villagesql_sys::vef_type_id_VEF_TYPE_CUSTOM
+    }
+
+    /// The custom type's name, or `None` if this isn't a custom type.
+    #[must_use]
+    pub fn custom_name(&self) -> Option<&str> {
+        if self.is_custom() && !self.inner.custom_type.is_null() {
+            // SAFETY: server guarantees a valid NUL-terminated UTF-8 name for custom types.
+            Some(unsafe { cstr_to_str(self.inner.custom_type) })
+        } else {
+            None
+        }
     }
 }
 
@@ -933,9 +979,13 @@ unsafe fn cstr_to_str<'a>(p: *const c_char) -> &'a str {
 }
 
 unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
-    let params: Box<[vef_type_t]> = d.params.iter().map(|t| t.to_raw()).collect();
-    let param_count = u32::try_from(params.len()).expect("param count exceeds u32");
-    let params_ptr = Box::into_raw(params) as *const vef_type_t;
+    let (param_count, params_ptr) = if d.varargs {
+        (villagesql_sys::VEF_PARAM_VARARGS, std::ptr::null())
+    } else {
+        let params: Box<[vef_type_t]> = d.params.iter().map(|t| t.to_raw()).collect();
+        let count = u32::try_from(params.len()).expect("param count exceeds u32");
+        (count, Box::into_raw(params) as *const vef_type_t)
+    };
     let sig = Box::into_raw(Box::new(vef_signature_t {
         param_count,
         params: params_ptr,
@@ -1223,6 +1273,7 @@ macro_rules! func {
                 trampoline: [< __vsql_trampoline_ $impl_fn >],
                 buffer_size: $bs,
                 deterministic: $det,
+                varargs: false,
                 prerun: Some([< __vsql_prerun_ $impl_fn >]),
                 postrun: Some([< __vsql_postrun_ $impl_fn >]),
                 clear: None,
@@ -1259,6 +1310,7 @@ macro_rules! func {
                 trampoline: [< __vsql_trampoline_ $impl_fn >],
                 buffer_size: $bs,
                 deterministic: $det,
+                varargs: false,
                 prerun: None,
                 postrun: None,
                 clear: None,
@@ -1348,6 +1400,7 @@ macro_rules! agg_func {
                 trampoline: [< __vsql_trampoline_ $result_fn >],
                 buffer_size: $bs,
                 deterministic: $det,
+                varargs: false,
                 prerun: Some([< __vsql_agg_prerun_ $result_fn >]),
                 postrun: Some([< __vsql_postrun_ $result_fn >]),
                 clear: Some([< __vsql_clear_ $result_fn >]),
@@ -1363,6 +1416,142 @@ macro_rules! agg_func {
             state: $state, clear: $clear, accumulate: $accum,
             buffer_size: 0, deterministic: false)
     };
+}
+
+/// Declare a varargs VDF. The function accepts any number of arguments. The
+/// `prerun` hook is responsible for validating the count and types
+/// (the server does none). `state:` names the per-statement state. `prerun:`
+/// sets it up.
+#[macro_export]
+macro_rules! varargs_func {
+    // Full form: buffer size + determinism specified.
+    ($impl_fn:ident, $sql_name:literal -> $ret:expr,
+     state: $state:ty, prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
+        $crate::paste::paste! {
+            // row trampoline borrows the state.
+            unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
+            }
+            // prerun trampoline: validates arg count/types, sets up state.
+            unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_prerun_args_t,
+                result: *mut $crate::sys::vef_prerun_result_t,
+            ) {
+                $crate::dispatch_prerun::<$state>($prerun, args, result);
+            }
+            // postrun trampoline: auto-drops the state.
+            unsafe extern "C" fn [< __vsql_postrun_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_postrun_args_t,
+                _result: *mut $crate::sys::vef_postrun_result_t,
+            ) {
+                $crate::dispatch_postrun::<$state>(args);
+            }
+            $crate::FuncDescriptor {
+                sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: &[],
+                returns: $ret,
+                trampoline: [< __vsql_trampoline_ $impl_fn >],
+                buffer_size: $bs,
+                deterministic: $det,
+                varargs: true,
+                prerun: Some([< __vsql_prerun_ $impl_fn >]),
+                postrun: Some([< __vsql_postrun_ $impl_fn >]),
+                clear: None,
+                accumulate: None,
+            }
+        }
+    }};
+
+    // Shorthand: server-default buffer size, non-deterministic.
+    ($impl_fn:ident, $sql_name:literal -> $ret:expr,
+     state: $state:ty, prerun: $prerun:ident) => {
+        $crate::varargs_func!($impl_fn, $sql_name -> $ret,
+            state: $state, prerun: $prerun, buffer_size: 0, deterministic: false)
+    };
+
+    // Prerun-only form: validatoin (+ optional buffer sizing), no state.
+    ($impl_fn:ident, $sql_name:literal -> $ret:expr,
+        prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
+            $crate::paste::paste! {
+                // row trampoline: STATELESS. dispatch_vdf, not _with_state.
+                unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
+                    _ctx: *mut $crate::sys::vef_context_t,
+                    args: *mut $crate::sys::vef_vdf_args_t,
+                    result: *mut $crate::sys::vef_vdf_result_t,
+                ) {
+                    $crate::dispatch_vdf($impl_fn, args, result);
+                }
+                // prerun trampoline: validates only. State type is (). Nothing stored.
+                unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
+                    _ctx: *mut $crate::sys::vef_context_t,
+                    args: *mut $crate::sys::vef_prerun_args_t,
+                    result: *mut $crate::sys::vef_prerun_result_t,
+                ) {
+                    $crate::dispatch_prerun::<()>($prerun, args, result);
+                }
+                $crate::FuncDescriptor {
+                    sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
+                        as *const ::std::os::raw::c_char,
+                    params: &[],
+                    returns: $ret,
+                    trampoline: [< __vsql_trampoline_ $impl_fn >],
+                    buffer_size: $bs,
+                    deterministic: $det,
+                    varargs: true,
+                    prerun: Some([< __vsql_prerun_ $impl_fn >]),
+                    postrun: None,
+                    clear: None,
+                    accumulate: None,
+                }
+            }
+        }};
+
+        // Prerun-only shorthand.
+        ($impl_fn:ident, $sql_name:literal -> $ret:expr, prerun: $prerun:ident) => {
+            $crate::varargs_func!($impl_fn, $sql_name -> $ret,
+                prerun: $prerun, buffer_size: 0, deterministic: false)
+        };
+
+        // Bare form: no prerun, no state, no validation (server-default buffer).
+        ($impl_fn: ident, $sql_name:literal -> $ret:expr,
+            buffer_size: $bs:expr, deterministic: $det:expr) => {{
+                $crate::paste::paste! {
+                    unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
+                        _ctx: *mut $crate::sys::vef_context_t,
+                        args: *mut $crate::sys::vef_vdf_args_t,
+                        result: *mut $crate::sys::vef_vdf_result_t,
+                    ) {
+                        $crate::dispatch_vdf($impl_fn, args, result);
+                    }
+                    $crate::FuncDescriptor {
+                        sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
+                            as *const ::std::os::raw::c_char,
+                        params: &[],
+                        returns: $ret,
+                        trampoline: [< __vsql_trampoline_ $impl_fn >],
+                        buffer_size: $bs,
+                        deterministic: $det,
+                        varargs: true,
+                        prerun: None,
+                        postrun: None,
+                        clear: None,
+                        accumulate: None,
+                    }
+                }
+            }};
+
+            // Bare shorthand.
+            ($impl_fn:ident, $sql_name:literal -> $ret:expr) => {
+                $crate::varargs_func!($impl_fn, $sql_name -> $ret,
+                    buffer_size: 0, deterministic: false)
+            };
 }
 
 /// Internal: emits the four shared VDFs (`from_string`/`to_string`/`compare`/`hash`)
@@ -1495,6 +1684,7 @@ macro_rules! __vsql_type_vdfs {
                 trampoline: [< __vsql_trampoline_from_string_ $enc_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                varargs: false,
                 prerun: None,
                 postrun: None,
                 clear: None,
@@ -1508,6 +1698,7 @@ macro_rules! __vsql_type_vdfs {
                 trampoline: [< __vsql_trampoline_to_string_ $dec_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                varargs: false,
                 prerun: None,
                 postrun: None,
                 clear: None,
@@ -1521,6 +1712,7 @@ macro_rules! __vsql_type_vdfs {
                 trampoline: [< __vsql_trampoline_compare_ $cmp_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                varargs: false,
                 prerun: None,
                 postrun: None,
                 clear: None,
@@ -1535,6 +1727,7 @@ macro_rules! __vsql_type_vdfs {
                     trampoline: [< __vsql_trampoline_hash_ $hash_fn >],
                     buffer_size: 0,
                     deterministic: true,
+                    varargs: false,
                     prerun: None,
                     postrun: None,
                     clear: None,
@@ -1749,6 +1942,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 trampoline: [< __vsql_trampoline_from_string_ $enc_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                varargs: false,
                 prerun: None,
                 postrun: None,
                 clear: None,
@@ -1762,6 +1956,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 trampoline: [< __vsql_trampoline_to_string_ $dec_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                varargs: false,
                 prerun: None,
                 postrun: None,
                 clear: None,
@@ -1775,6 +1970,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 trampoline: [< __vsql_trampoline_compare_ $cmp_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                varargs: false,
                 prerun: None,
                 postrun: None,
                 clear: None,
@@ -1789,6 +1985,7 @@ macro_rules! __vsql_type_vdfs_typed {
                     trampoline: [< __vsql_trampoline_hash_ $hash_fn >],
                     buffer_size: 0,
                     deterministic: true,
+                    varargs: false,
                     prerun: None,
                     postrun: None,
                     clear: None,
@@ -1803,6 +2000,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 trampoline: [< __vsql_trampoline_int_to_params_ $i2p_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                varargs: false,
                 prerun: None,
                 postrun: None,
                 clear: None,
@@ -1816,6 +2014,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 trampoline: [< __vsql_trampoline_resolve_params_ $rp_fn >],
                 buffer_size: 0,
                 deterministic: true,
+                varargs: false,
                 prerun: None,
                 postrun: None,
                 clear: None,
@@ -1830,6 +2029,7 @@ macro_rules! __vsql_type_vdfs_typed {
                     trampoline: [< __vsql_trampoline_intrinsic_default_ $default_fn >],
                     buffer_size: $max_dec,
                     deterministic: true,
+                    varargs: false,
                     prerun: None,
                     postrun: None,
                     clear: None,
