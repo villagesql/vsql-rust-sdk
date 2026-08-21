@@ -448,6 +448,8 @@ pub struct FuncDescriptor {
     pub deterministic: bool,
     pub prerun: villagesql_sys::vef_prerun_func_t,
     pub postrun: villagesql_sys::vef_postrun_func_t,
+    pub clear: villagesql_sys::vef_vdf_clear_func_t,
+    pub accumulate: villagesql_sys::vef_vdf_accumulate_func_t,
 }
 
 unsafe impl Send for FuncDescriptor {}
@@ -678,6 +680,51 @@ pub unsafe fn dispatch_postrun<T>(args: *mut vef_postrun_args_t) {
     reclaim_state::<T>((*args).user_data);
 }
 
+/// Aggregate prerun: allocate the accumulator at its default value.
+///
+/// # Safety
+/// `result` must be valid for the duration of the call.
+pub unsafe fn dispatch_agg_prerun<T: Default>(
+    _args: *mut vef_prerun_args_t,
+    result: *mut vef_prerun_result_t,
+) {
+    PrerunResult::<T>::from_raw(result).set_state(T::default());
+}
+
+/// Aggregate clear: reset the accumulator at the start of each group.
+///
+/// # Safety
+/// `args` is valid. Its `user_data` was set by a prior prerun. `T` matches.
+pub unsafe fn dispatch_clear<T>(f: fn(&mut T), args: *mut vef_vdf_args_t) {
+    let state = borrow_state::<T>((*args).user_data);
+    f(state);
+}
+
+/// Aggregate accumulate: fold one row into the accumulator. Returns nothing.
+///
+/// # Safety
+/// `args` is valid. Its `user_data` was set by a prior prerun. `T` matches.
+pub unsafe fn dispatch_accumulate<T>(f: fn(&mut T, &[InValue]), args: *mut vef_vdf_args_t) {
+    let args = &*args;
+    let state = borrow_state::<T>(args.user_data);
+    let in_values = read_in_values(args);
+    f(state, &in_values);
+}
+
+/// Aggregate result: produce the group's output from the finished accumulator.
+/// Called once per group, after the last row is folded in.
+///
+/// # Safety
+/// `args`/`result` are valid. `user_data` was set by a prior prerun. `T` matches.
+pub unsafe fn dispatch_agg_result<T>(
+    f: fn(&T) -> VdfReturn,
+    args: *mut vef_vdf_args_t,
+    result: *mut vef_vdf_result_t,
+) {
+    let state = borrow_state::<T>((*args).user_data);
+    write_result(f(state), &mut *result);
+}
+
 /// Dispatch a parameterized type's `from_string` (encode), including the
 /// constant-string inference path.
 ///
@@ -903,8 +950,8 @@ unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
         postrun: d.postrun,
         buffer_size: d.buffer_size,
         deterministic: d.deterministic,
-        clear: None,
-        accumulate: None,
+        clear: d.clear,
+        accumulate: d.accumulate,
     }))
 }
 
@@ -1178,6 +1225,8 @@ macro_rules! func {
                 deterministic: $det,
                 prerun: Some([< __vsql_prerun_ $impl_fn >]),
                 postrun: Some([< __vsql_postrun_ $impl_fn >]),
+                clear: None,
+                accumulate: None,
             }
         }
      }};
@@ -1212,6 +1261,8 @@ macro_rules! func {
                 deterministic: $det,
                 prerun: None,
                 postrun: None,
+                clear: None,
+                accumulate: None,
             }
         }
     }};
@@ -1229,6 +1280,87 @@ macro_rules! func {
     };
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr) => {
         $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
+            buffer_size: 0, deterministic: false)
+    };
+}
+
+/// Declare an aggregate SQL function (SUM/COUNT-style). The first ident is the
+/// result fn (`fn(&State) -> VdfReturn`), which produces each group's value.
+/// `state:` names the accumulator (must be `Default`). `clear:` resets it at the
+/// start of each group. `accumulate:` folds one row.
+///
+/// ```ignore
+/// villagesql::agg_func!(my_sum_result, "my_sum", [villagesql::Type::Int] -> villagesql::Type::Int,
+///     state: SumState, clear: my_sum_clear, accumulate: my_sum_acc)
+/// ```
+#[macro_export]
+macro_rules! agg_func {
+    // Full form: result-buffer size and determinism specified.
+    ($result_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
+     state: $state:ty, clear: $clear:ident, accumulate: $accum:ident,
+     buffer_size: $bs:expr, deterministic: $det:expr) => {{
+        $crate::paste::paste! {
+            // result trampoline: occupies the `vdf` slot. Called once per group.
+            unsafe extern "C" fn [< __vsql_trampoline_ $result_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_agg_result::<$state>($result_fn, args, result);
+            }
+            // prerun trampoline: allocates State::default().
+            unsafe extern "C" fn [< __vsql_agg_prerun_ $result_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_prerun_args_t,
+                result: *mut $crate::sys::vef_prerun_result_t,
+            ) {
+                $crate::dispatch_agg_prerun::<$state>(args, result);
+            }
+            // postrun trampoline: drops the state.
+            unsafe extern "C" fn [< __vsql_postrun_ $result_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_postrun_args_t,
+                _result: *mut $crate::sys::vef_postrun_result_t,
+            ) {
+                $crate::dispatch_postrun::<$state>(args);
+            }
+            // clear trampoline: note the ABI has no result param here.
+            unsafe extern "C" fn [< __vsql_clear_ $result_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+            ) {
+                $crate::dispatch_clear::<$state>($clear, args);
+            }
+            // accumulate trampoline: result param unused (server pre-sets VALUE).
+            unsafe extern "C" fn [< __vsql_accumulate_ $result_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                _result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_accumulate::<$state>($accum, args);
+            }
+            static [< __VSQL_PARAMS_ $result_fn:upper >]: &[$crate::Type] = &[$($param),*];
+            $crate::FuncDescriptor {
+                sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: [< __VSQL_PARAMS_ $result_fn:upper >],
+                returns: $ret,
+                trampoline: [< __vsql_trampoline_ $result_fn >],
+                buffer_size: $bs,
+                deterministic: $det,
+                prerun: Some([< __vsql_agg_prerun_ $result_fn >]),
+                postrun: Some([< __vsql_postrun_ $result_fn >]),
+                clear: Some([< __vsql_clear_ $result_fn >]),
+                accumulate: Some([< __vsql_accumulate_ $result_fn >]),
+            }
+        }
+    }};
+
+    // Shorthand: server-default buffer size, non-deterministic.
+    ($result_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
+     state: $state:ty, clear: $clear:ident, accumulate: $accum:ident) => {
+        $crate::agg_func!($result_fn, $sql_name, [$($param),*] -> $ret,
+            state: $state, clear: $clear, accumulate: $accum,
             buffer_size: 0, deterministic: false)
     };
 }
@@ -1365,6 +1497,8 @@ macro_rules! __vsql_type_vdfs {
                 deterministic: true,
                 prerun: None,
                 postrun: None,
+                clear: None,
+                accumulate: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::to_string\0").as_bytes().as_ptr()
@@ -1376,6 +1510,8 @@ macro_rules! __vsql_type_vdfs {
                 deterministic: true,
                 prerun: None,
                 postrun: None,
+                clear: None,
+                accumulate: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::compare\0").as_bytes().as_ptr()
@@ -1387,6 +1523,8 @@ macro_rules! __vsql_type_vdfs {
                 deterministic: true,
                 prerun: None,
                 postrun: None,
+                clear: None,
+                accumulate: None,
             });
             $(
                 __embedded.push($crate::FuncDescriptor {
@@ -1399,6 +1537,8 @@ macro_rules! __vsql_type_vdfs {
                     deterministic: true,
                     prerun: None,
                     postrun: None,
+                    clear: None,
+                    accumulate: None,
                 });
             )?
 
@@ -1611,6 +1751,8 @@ macro_rules! __vsql_type_vdfs_typed {
                 deterministic: true,
                 prerun: None,
                 postrun: None,
+                clear: None,
+                accumulate: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::to_string\0").as_bytes().as_ptr()
@@ -1622,6 +1764,8 @@ macro_rules! __vsql_type_vdfs_typed {
                 deterministic: true,
                 prerun: None,
                 postrun: None,
+                clear: None,
+                accumulate: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::compare\0").as_bytes().as_ptr()
@@ -1633,6 +1777,8 @@ macro_rules! __vsql_type_vdfs_typed {
                 deterministic: true,
                 prerun: None,
                 postrun: None,
+                clear: None,
+                accumulate: None,
             });
             $(
                 __embedded.push($crate::FuncDescriptor {
@@ -1645,6 +1791,8 @@ macro_rules! __vsql_type_vdfs_typed {
                     deterministic: true,
                     prerun: None,
                     postrun: None,
+                    clear: None,
+                    accumulate: None,
                 });
             )?
             __embedded.push($crate::FuncDescriptor {
@@ -1657,6 +1805,8 @@ macro_rules! __vsql_type_vdfs_typed {
                 deterministic: true,
                 prerun: None,
                 postrun: None,
+                clear: None,
+                accumulate: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::resolve_params\0").as_bytes().as_ptr()
@@ -1668,6 +1818,8 @@ macro_rules! __vsql_type_vdfs_typed {
                 deterministic: true,
                 prerun: None,
                 postrun: None,
+                clear: None,
+                accumulate: None,
             });
             $(
                 __embedded.push($crate::FuncDescriptor {
@@ -1680,6 +1832,8 @@ macro_rules! __vsql_type_vdfs_typed {
                     deterministic: true,
                     prerun: None,
                     postrun: None,
+                    clear: None,
+                    accumulate: None,
                 });
             )?
 
