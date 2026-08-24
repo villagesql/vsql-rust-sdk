@@ -1286,8 +1286,8 @@ macro_rules! func {
 
 /// Declare an aggregate SQL function (SUM/COUNT-style). The first ident is the
 /// result fn (`fn(&State) -> VdfReturn`), which produces each group's value.
-/// `state:` names the accumulator (must be `Default`). `clear:` resets it at the
-/// start of each group. `accumulate:` folds one row.
+/// `state:` names the accumulator (must implement `Default`). `clear:` resets 
+/// it at the start of each group. `accumulate:` folds one row.
 ///
 /// ```ignore
 /// villagesql::agg_func!(my_sum_result, "my_sum", [villagesql::Type::Int] -> villagesql::Type::Int,
