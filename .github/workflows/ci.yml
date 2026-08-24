@@ -138,6 +138,8 @@ jobs:
             dir: examples/vsql_sys_var
           - name: vsql_thread_worker
             dir: examples/vsql_thread_worker
+          - name: vsql_varargs
+            dir: examples/vsql_varargs
 
     steps:
       - name: Checkout

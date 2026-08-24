@@ -1,0 +1,7 @@
+{
+    "name": "vsql_varargs",
+    "version": "0.1.0",
+    "description": "Example VillageSQL extension: a varargs VDF that joins a variable number of string arguments",
+    "author": "VillageSQL Community",
+    "license": "GPL-2.0"
+}
