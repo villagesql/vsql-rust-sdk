@@ -181,12 +181,12 @@ fn point_path(args: &[InValue]) -> VdfReturn {
 
 villagesql::extension! {
     funcs: [
-        villagesql::varargs_func!(str_join, "str_join" -> villagesql::Type::String,
+        villagesql::varargs_func!(str_join, "str_join", [..] -> villagesql::Type::String,
             state: JoinState, prerun: str_join_prerun),
-        villagesql::varargs_func!(arg_count, "arg_count" -> villagesql::Type::Int),
-        villagesql::varargs_func!(describe, "describe" -> villagesql::Type::String,
+        villagesql::varargs_func!(arg_count, "arg_count", [..] -> villagesql::Type::Int),
+        villagesql::varargs_func!(describe, "describe", [..] -> villagesql::Type::String,
             prerun: describe_prerun),
-        villagesql::varargs_func!(point_path, "point_path" -> villagesql::Type::String,
+        villagesql::varargs_func!(point_path, "point_path", [..] -> villagesql::Type::String,
             prerun: point_path_prerun),
     ],
     types: [

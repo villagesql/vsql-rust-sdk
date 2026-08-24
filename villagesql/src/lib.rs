@@ -1420,12 +1420,14 @@ macro_rules! agg_func {
 
 /// Declare a varargs VDF. The function accepts any number of arguments. The
 /// `prerun` hook is responsible for validating the count and types
-/// (the server does none). `state:` names the per-statement state. `prerun:`
-/// sets it up.
+/// (the server does none). `state:` names the per-statement value the function
+/// carries across every row of one statement, allocated in `prerun`, borrowed
+/// by each row call, and then dropped after the statement. `prerun:` names the
+/// setup function.
 #[macro_export]
 macro_rules! varargs_func {
     // Full form: buffer size + determinism specified.
-    ($impl_fn:ident, $sql_name:literal -> $ret:expr,
+    ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
      state: $state:ty, prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
         $crate::paste::paste! {
             // row trampoline borrows the state.
@@ -1470,14 +1472,14 @@ macro_rules! varargs_func {
     }};
 
     // Shorthand: server-default buffer size, non-deterministic.
-    ($impl_fn:ident, $sql_name:literal -> $ret:expr,
+    ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
      state: $state:ty, prerun: $prerun:ident) => {
-        $crate::varargs_func!($impl_fn, $sql_name -> $ret,
+        $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
             state: $state, prerun: $prerun, buffer_size: 0, deterministic: false)
     };
 
-    // Prerun-only form: validatoin (+ optional buffer sizing), no state.
-    ($impl_fn:ident, $sql_name:literal -> $ret:expr,
+    // Prerun-only form: validation (+ optional buffer sizing), no state.
+    ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
         prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
             $crate::paste::paste! {
                 // row trampoline: STATELESS. dispatch_vdf, not _with_state.
@@ -1514,13 +1516,13 @@ macro_rules! varargs_func {
         }};
 
         // Prerun-only shorthand.
-        ($impl_fn:ident, $sql_name:literal -> $ret:expr, prerun: $prerun:ident) => {
-            $crate::varargs_func!($impl_fn, $sql_name -> $ret,
+        ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr, prerun: $prerun:ident) => {
+            $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
                 prerun: $prerun, buffer_size: 0, deterministic: false)
         };
 
         // Bare form: no prerun, no state, no validation (server-default buffer).
-        ($impl_fn: ident, $sql_name:literal -> $ret:expr,
+        ($impl_fn: ident, $sql_name:literal, [..] -> $ret:expr,
             buffer_size: $bs:expr, deterministic: $det:expr) => {{
                 $crate::paste::paste! {
                     unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
@@ -1548,8 +1550,8 @@ macro_rules! varargs_func {
             }};
 
             // Bare shorthand.
-            ($impl_fn:ident, $sql_name:literal -> $ret:expr) => {
-                $crate::varargs_func!($impl_fn, $sql_name -> $ret,
+            ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr) => {
+                $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
                     buffer_size: 0, deterministic: false)
             };
 }
