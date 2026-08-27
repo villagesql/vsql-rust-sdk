@@ -3,6 +3,7 @@
 
 pub mod keyring;
 pub mod ping;
+pub mod sql_query;
 pub mod status_var;
 pub mod sys_var;
 pub mod thread_worker;

@@ -5,6 +5,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../include/villagesql/abi/preview/status_var.h");
     println!("cargo:rerun-if-changed=../include/villagesql/abi/preview/keyring.h");
     println!("cargo:rerun-if-changed=../include/villagesql/abi/preview/thread_worker.h");
+    println!("cargo:rerun-if-changed=../include/villagesql/abi/preview/sql_query.h");
 
     #[cfg(feature = "regenerate-bindings")]
     regenerate();
@@ -32,10 +33,11 @@ fn regenerate() {
             "villagesql/abi/preview/thread_worker.h",
             "preview/thread_worker.rs",
         ),
+        ("villagesql/abi/preview/sql_query.h", "preview/sql_query.rs"),
     ];
 
     for (header, out_file) in headers {
-        let bindings = bindgen::Builder::default()
+        let mut builder = bindgen::Builder::default()
             .header(include_dir.join(header).to_str().unwrap())
             .clang_arg(format!("-I{}", include_dir.display()))
             .clang_arg("-x")
@@ -44,10 +46,15 @@ fn regenerate() {
             .allowlist_type("vef_.*")
             .allowlist_type("VEF_.*")
             .allowlist_var("VEF_.*")
-            .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-            .generate()
-            .expect("Unable to generate bindings");
+            .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
+        // sql_query.h only forward-declares vef_thread_handle_t, since its
+        // already defined by thread_worker.rs. Skip it here so the two
+        // include!s don't collide.
+        if out_file == "preview/sql_query.rs" {
+            builder = builder.blocklist_type("vef_thread_handle_t");
+        }
+        let bindings = builder.generate().expect("Unable to generate bindings");
         bindings
             .write_to_file(out_dir.join(out_file))
             .expect("Couldn't write bindings");

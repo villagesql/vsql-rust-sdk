@@ -1,0 +1,12 @@
+[package]
+name = "vsql_sql_query"
+version = "0.1.0"
+edition = "2021"
+description = "Example VillageSQL extension: in-process SQL from a worker thread via the sql_query preview capability"
+license = "GPL-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+villagesql = { path = "../../villagesql" }

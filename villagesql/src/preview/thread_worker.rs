@@ -80,13 +80,18 @@ impl From<NextWakeup> for vef_next_wakeup_t {
     }
 }
 
-/// Opaque handle passed to the work function. Reserved for calling `sql_query`
-/// from the worker thread once that capability is ported - no methods yet.
-#[allow(dead_code)] // the inner pointer isn't read until sql_query lands
+/// Opaque handle passed to the work function. Pass it to
+/// `SqlQueryCapability::open` to run SQL on the worker thread.
 pub struct ThreadHandle(*mut vef_thread_handle_t);
 
+impl ThreadHandle {
+    pub(crate) fn as_raw(&self) -> *mut vef_thread_handle_t {
+        self.0
+    }
+}
+
 /// The work function you write. Runs on the server's worker thread.
-pub type WorkFn = fn(WakeupReason, ThreadHandle) -> NextWakeup;
+pub type WorkFn = fn(WakeupReason, &ThreadHandle) -> NextWakeup;
 
 /// The `vsql::preview::thread_worker` capability. Declare it as a `static` and
 /// list it via `requires: [&WORKER]`.
@@ -190,7 +195,7 @@ unsafe extern "C" fn trampoline(
 
     // Run the user's safe Rust function.
     let next = catch_unwind(AssertUnwindSafe(|| {
-        (cap.work_fn)(reason, ThreadHandle(thread))
+        (cap.work_fn)(reason, &ThreadHandle(thread))
     }))
     .unwrap_or_else(|_| NextWakeup::unchanged());
 

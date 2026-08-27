@@ -9,3 +9,4 @@ include!("bindings/preview/sys_var.rs");
 include!("bindings/preview/status_var.rs");
 include!("bindings/preview/keyring.rs");
 include!("bindings/preview/thread_worker.rs");
+include!("bindings/preview/sql_query.rs");

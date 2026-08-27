@@ -1,0 +1,16 @@
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_sql_query;
+# Before the worker is enabled, it has not run a query yet (-1).
+SELECT vsql_sql_query.probe_checks() AS before_enable;
+before_enable
+-1
+# Enable the worker. On its next tick it opens a session and runs the suite.
+SET GLOBAL vsql_sql_query.probe_enabled = ON;
+# Every API path worked in-process on the worker thread.
+SELECT vsql_sql_query.probe_checks() = 63 AS all_checks_passed;
+all_checks_passed
+1
+SET GLOBAL vsql_sql_query.probe_enabled = OFF;
+UNINSTALL EXTENSION vsql_sql_query;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;
