@@ -13,7 +13,7 @@ use villagesql::{InValue, VdfReturn};
 /// Bumped by the background worker on each periodic wakeup.
 static TICKS: AtomicI64 = AtomicI64::new(0);
 
-fn worker(reason: WakeupReason, _handle: ThreadHandle) -> NextWakeup {
+fn worker(reason: WakeupReason, _handle: &ThreadHandle) -> NextWakeup {
     if reason == WakeupReason::Periodic {
         TICKS.fetch_add(1, Ordering::Relaxed);
     }

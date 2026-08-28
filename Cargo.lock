@@ -580,6 +580,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vsql_sql_query"
+version = "0.1.0"
+dependencies = [
+ "villagesql",
+]
+
+[[package]]
 name = "vsql_status_var"
 version = "0.1.0"
 dependencies = [

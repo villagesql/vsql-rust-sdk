@@ -132,6 +132,8 @@ jobs:
             dir: examples/vsql_rational
           - name: vsql_rot13
             dir: examples/vsql_rot13
+          - name: vsql_sql_query
+            dir: examples/vsql_sql_query
           - name: vsql_status_var
             dir: examples/vsql_status_var
           - name: vsql_sys_var

@@ -1,0 +1,7 @@
+{
+    "name": "vsql_sql_query",
+    "version": "0.1.0",
+    "description": "Example VillageSQL extension: in-process SQL from a worker thread via the sql_query preview capability",
+    "author": "VillageSQL Community",
+    "license": "GPL-2.0"
+}

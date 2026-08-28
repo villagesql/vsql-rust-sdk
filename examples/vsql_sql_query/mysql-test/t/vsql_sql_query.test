@@ -1,0 +1,29 @@
+# Tests the vsql::preview::sql_query capability. A background worker opens a SSL
+# session on its own thread and runs a suite covering the whole API: buffered
+# execute and row iteration, int/str/real columns, SQL NULL, streaming for_each
+# over multiple rows, and error diagnostics. Each passing check sets a bit.
+# probe_checks() returns the mask (63 = all six passed).
+
+SET PERSIST vsql_allow_preview_extensions = ON;
+
+INSTALL EXTENSION vsql_sql_query;
+
+--echo # Before the worker is enabled, it has not run a query yet (-1).
+SELECT vsql_sql_query.probe_checks() AS before_enable;
+
+--echo # Enable the worker. On its next tick it opens a session and runs the suite.
+SET GLOBAL vsql_sql_query.probe_enabled = ON;
+
+# Poll until all six sub-checks pass (bitmask 63).
+let $wait_condition = SELECT vsql_sql_query.probe_checks() = 63;
+--source include/wait_condition.inc
+
+--echo # Every API path worked in-process on the worker thread.
+SELECT vsql_sql_query.probe_checks() = 63 AS all_checks_passed;
+
+SET GLOBAL vsql_sql_query.probe_enabled = OFF;
+
+UNINSTALL EXTENSION vsql_sql_query;
+
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;
