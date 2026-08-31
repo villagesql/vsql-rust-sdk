@@ -1310,8 +1310,9 @@ pub unsafe fn free_registration(registration: *mut vef_registration_t) {
 
 /// Produce a [`Type::Custom`] value for the named custom type.
 ///
-/// ```ignore
-/// villagesql::custom!("rational")   // → Type::Custom pointing to b"rational\0"
+/// ```
+/// let t = villagesql::custom!("rational");   // Type::Custom pointing to b"rational\0"
+/// assert_eq!(t, villagesql::custom!("rational"));
 /// ```
 #[macro_export]
 macro_rules! custom {
@@ -1337,7 +1338,12 @@ macro_rules! custom {
 /// The extension's own name and version are not declared here. The server reads
 /// both from the `manifest.json` in the packaged `.veb`.
 ///
-/// ```ignore
+/// ```no_run
+/// # use villagesql::{InValue, VdfReturn};
+/// # fn my_impl(_args: &[InValue]) -> VdfReturn { VdfReturn::null() }
+/// # fn my_encode(s: &str) -> Result<Vec<u8>, String> { Ok(s.as_bytes().to_vec()) }
+/// # fn my_decode(b: &[u8]) -> Result<String, String> { Ok(String::from_utf8_lossy(b).into_owned()) }
+/// # fn my_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering { a.cmp(b) }
 /// villagesql::extension! {
 ///     funcs: [
 ///         villagesql::func!(my_impl, "sql_name", [villagesql::Type::String] -> villagesql::Type::String),
@@ -1350,9 +1356,11 @@ macro_rules! custom {
 ///             encode: my_encode,
 ///             decode: my_decode,
 ///             compare: my_compare,
+///             default: "0",
 ///         ),
 ///     ]
 /// }
+/// # fn main() {}
 /// ```
 ///
 /// # Requesting a preview capability
@@ -1361,10 +1369,18 @@ macro_rules! custom {
 /// registration the server resolves every one and writes back a function table;
 /// the capability's own methods then work. See the [`preview`] module.
 ///
-/// ```ignore
+/// ```no_run
 /// use villagesql::preview::ping::PingCapability;
+/// # use villagesql::{InValue, VdfReturn};
 ///
 /// static PING: PingCapability = PingCapability::new();
+///
+/// fn ping_impl(_args: &[InValue]) -> VdfReturn {
+///     match PING.ping() {
+///         Some(v) => VdfReturn::int(i64::try_from(v).unwrap_or(i64::MAX)),
+///         None => VdfReturn::null(),
+///     }
+/// }
 ///
 /// villagesql::extension! {
 ///     funcs: [
@@ -1372,6 +1388,7 @@ macro_rules! custom {
 ///     ],
 ///     requires: [&PING],
 /// }
+/// # fn main() {}
 /// ```
 ///
 /// An extension that names any capability will not install unless the server was
@@ -1445,13 +1462,20 @@ macro_rules! extension {
 /// The first three arguments are always the same: the Rust function, the name SQL
 /// will call it by, and the signature as `[params] -> return`.
 ///
-/// ```ignore
-/// villagesql::func!(impl_fn, "sql_name", [villagesql::Type::String] -> villagesql::Type::String)
-/// villagesql::func!(impl_fn, "sql_name", [villagesql::custom!("my_type")] -> villagesql::custom!("my_type"),
-///             deterministic: true)
+/// ```no_run
+/// # use villagesql::{InValue, PrerunArgs, PrerunResult, VdfReturn};
+/// # fn shout(_args: &[InValue]) -> VdfReturn { VdfReturn::null() }
+/// # fn reduce(_args: &[InValue]) -> VdfReturn { VdfReturn::null() }
+/// # fn tally(_state: &mut i64, _args: &[InValue]) -> VdfReturn { VdfReturn::null() }
+/// # fn my_prerun(_args: PrerunArgs, out: PrerunResult<i64>) { out.set_state(0i64); }
+/// # fn my_postrun(_state: &mut i64) {}
+/// let a = villagesql::func!(shout, "shout", [villagesql::Type::String] -> villagesql::Type::String);
+/// let b = villagesql::func!(reduce, "reduce", [villagesql::custom!("my_type")] -> villagesql::custom!("my_type"),
+///             deterministic: true);
 /// // stateful, with setup and optional teardown before the automatic drop:
-/// villagesql::func!(impl_fn, "sql_name", [] -> villagesql::Type::Int,
-///             state: MyState, prerun: my_prerun, postrun: my_postrun)
+/// let c = villagesql::func!(tally, "tally", [] -> villagesql::Type::Int,
+///             state: i64, prerun: my_prerun, postrun: my_postrun);
+/// # let _ = (a, b, c);
 /// ```
 ///
 /// # Optional keys
@@ -1488,19 +1512,20 @@ macro_rules! extension {
 /// row, before it drops the state. Use it for teardown that has to happen while the
 /// state is still borrowable. It runs ahead of the drop; it does not replace it.
 ///
-/// ```ignore
+/// ```no_run
 /// // Counts how many rows this statement has processed.
-/// fn setup(_args: villagesql::PrerunArgs, out: villagesql::PrerunResult<u64>) {
-///     out.set_state(0u64);
+/// fn setup(_args: villagesql::PrerunArgs, out: villagesql::PrerunResult<i64>) {
+///     out.set_state(0i64);
 /// }
 ///
-/// fn call_index(state: &mut u64, _args: &[villagesql::InValue]) -> villagesql::VdfReturn {
+/// fn call_index(state: &mut i64, _args: &[villagesql::InValue]) -> villagesql::VdfReturn {
 ///     *state += 1;
-///     villagesql::VdfReturn::int(*state as i64)
+///     villagesql::VdfReturn::int(*state)
 /// }
 ///
-/// villagesql::func!(call_index, "call_index", [] -> villagesql::Type::Int,
-///     state: u64, prerun: setup)
+/// let d = villagesql::func!(call_index, "call_index", [] -> villagesql::Type::Int,
+///     state: i64, prerun: setup);
+/// # let _ = d;
 /// ```
 ///
 /// See `examples/vsql_call_index` for the complete crate.
@@ -1677,18 +1702,40 @@ macro_rules! func {
 /// because one statement can produce many groups and the same accumulator is reused
 /// for each.
 ///
-/// ```ignore
-/// villagesql::agg_func!(my_sum_result, "my_sum", [villagesql::Type::Int] -> villagesql::Type::Int,
-///     state: SumState, clear: my_sum_clear, accumulate: my_sum_acc)
+/// ```no_run
+/// # use villagesql::{InValue, VdfReturn};
+/// #[derive(Default)]
+/// struct SumState { total: i64 }
+///
+/// fn my_sum_clear(state: &mut SumState) { state.total = 0; }
+///
+/// fn my_sum_acc(state: &mut SumState, args: &[InValue]) {
+///     if let Some(InValue::Int(n)) = args.first() { state.total += *n; }
+/// }
+///
+/// fn my_sum_result(state: &SumState) -> VdfReturn { VdfReturn::int(state.total) }
+///
+/// let d = villagesql::agg_func!(my_sum_result, "my_sum", [villagesql::Type::Int] -> villagesql::Type::Int,
+///     state: SumState, clear: my_sum_clear, accumulate: my_sum_acc);
+/// # let _ = d;
 /// ```
 ///
 /// `buffer_size:` and `deterministic:` may follow, meaning the same as in [`func!`],
 /// and both must be given together:
 ///
-/// ```ignore
-/// villagesql::agg_func!(my_sum_result, "my_sum", [villagesql::Type::Int] -> villagesql::Type::Int,
+/// ```no_run
+/// # use villagesql::{InValue, VdfReturn};
+/// # #[derive(Default)]
+/// # struct SumState { total: i64 }
+/// # fn my_sum_clear(state: &mut SumState) { state.total = 0; }
+/// # fn my_sum_acc(state: &mut SumState, args: &[InValue]) {
+/// #     if let Some(InValue::Int(n)) = args.first() { state.total += *n; }
+/// # }
+/// # fn my_sum_result(state: &SumState) -> VdfReturn { VdfReturn::int(state.total) }
+/// let d = villagesql::agg_func!(my_sum_result, "my_sum", [villagesql::Type::Int] -> villagesql::Type::Int,
 ///     state: SumState, clear: my_sum_clear, accumulate: my_sum_acc,
-///     buffer_size: 64, deterministic: true)
+///     buffer_size: 64, deterministic: true);
+/// # let _ = d;
 /// ```
 ///
 /// See `examples/vsql_agg_sum` for the complete crate.
@@ -1795,7 +1842,14 @@ macro_rules! agg_func {
 /// [`PrerunResult::error`] rejects the call before any row runs. Prerun is also where
 /// the result buffer can be sized from the actual argument count.
 ///
-/// ```ignore
+/// ```no_run
+/// # use villagesql::{InValue, VdfReturn};
+/// # #[derive(Default)]
+/// # struct JoinState { calls: i64 }
+/// # fn str_join(state: &mut JoinState, _args: &[InValue]) -> VdfReturn {
+/// #     state.calls += 1;
+/// #     VdfReturn::string("")
+/// # }
 /// fn str_join_prerun(args: villagesql::PrerunArgs, mut out: villagesql::PrerunResult<JoinState>) {
 ///     if args.is_empty() {
 ///         out.error("str_join requires at least one argument");
@@ -1811,8 +1865,9 @@ macro_rules! agg_func {
 ///     out.set_state(JoinState::default());
 /// }
 ///
-/// villagesql::varargs_func!(str_join, "str_join", [..] -> villagesql::Type::String,
-///     state: JoinState, prerun: str_join_prerun)
+/// let d = villagesql::varargs_func!(str_join, "str_join", [..] -> villagesql::Type::String,
+///     state: JoinState, prerun: str_join_prerun);
+/// # let _ = d;
 /// ```
 ///
 /// See `examples/vsql_varargs` for the complete crate.
@@ -2575,8 +2630,20 @@ macro_rules! __vsql_type_vdfs_typed {
 /// `max_decode_buffer_length` needs no extra byte for a terminator. Returning more
 /// than it allows fails the statement rather than truncating the value.
 ///
-/// ```ignore
-/// villagesql::custom_type!(
+/// ```no_run
+/// # use std::cmp::Ordering;
+/// # fn counter_encode(s: &str) -> Result<Vec<u8>, String> {
+/// #     let n: i64 = s.parse().map_err(|_| "counter: not a number".to_string())?;
+/// #     Ok(n.to_le_bytes().to_vec())
+/// # }
+/// # fn counter_read(b: &[u8]) -> i64 {
+/// #     i64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8]))
+/// # }
+/// # fn counter_decode(b: &[u8]) -> Result<String, String> { Ok(counter_read(b).to_string()) }
+/// # fn counter_compare(a: &[u8], b: &[u8]) -> Ordering { counter_read(a).cmp(&counter_read(b)) }
+/// # fn counter_hash(b: &[u8]) -> usize { counter_read(b) as usize }
+/// # fn counter_default() -> Result<String, String> { Ok("0".to_string()) }
+/// let t = villagesql::custom_type!(
 ///     type_name: "counter",
 ///     persisted_length: 8,
 ///     max_decode_buffer_length: 20,
@@ -2585,7 +2652,8 @@ macro_rules! __vsql_type_vdfs_typed {
 ///     compare: counter_compare,
 ///     hash: counter_hash,
 ///     intrinsic_default_fn: counter_default,
-/// )
+/// );
+/// # let _ = t;
 /// ```
 ///
 /// See `examples/vsql_rational` for the complete crate.
@@ -2716,8 +2784,49 @@ macro_rules! custom_type {
 /// first. When the parameters are unknown, work them out from the value and record
 /// them with [`MaybeParams::set`]; the SDK reports them back to the server.
 ///
-/// ```ignore
-/// villagesql::parameterized_type!(
+/// ```no_run
+/// # use std::cmp::Ordering;
+/// # use villagesql::{MaybeParams, Params, Resolved};
+/// // A vector of `dimension` little-endian f32 values.
+/// struct TvectorParams { dimension: usize }
+///
+/// fn tvector_parse(params: Params) -> TvectorParams {
+///     TvectorParams { dimension: params.get("dimension").and_then(|d| d.parse().ok()).unwrap_or(0) }
+/// }
+///
+/// fn tvector_to_strings(p: &TvectorParams) -> Vec<(String, String)> {
+///     vec![("dimension".to_string(), p.dimension.to_string())]
+/// }
+///
+/// // `TVECTOR(768)` reaches this as the bare integer.
+/// fn tvector_int_to_params(n: i64) -> Result<String, String> {
+///     if n < 1 { return Err("tvector: dimension must be positive".to_string()); }
+///     Ok(format!("dimension={n}"))
+/// }
+///
+/// // Validate the declaration and say how many bytes a value takes.
+/// fn tvector_resolve_params(params: Params) -> Result<Resolved, String> {
+///     let d: i64 = params.get("dimension")
+///         .ok_or("tvector: missing 'dimension'")?
+///         .parse().map_err(|_| "tvector: bad dimension".to_string())?;
+///     Ok(Resolved::new(d * 4, d * 16))
+/// }
+/// # fn tvector_encode(s: &str, params: &mut MaybeParams<TvectorParams>) -> Result<Vec<u8>, String> {
+/// #     let vals: Vec<f32> = s.trim_matches(['[', ']'])
+/// #         .split(',').filter(|t| !t.trim().is_empty())
+/// #         .map(|t| t.trim().parse::<f32>().map_err(|e| e.to_string()))
+/// #         .collect::<Result<_, _>>()?;
+/// #     if !params.is_known() { params.set(TvectorParams { dimension: vals.len() }); }
+/// #     Ok(vals.iter().flat_map(|v| v.to_le_bytes()).collect())
+/// # }
+/// # fn tvector_decode(b: &[u8], _p: &TvectorParams) -> Result<String, String> {
+/// #     Ok(format!("[{} bytes]", b.len()))
+/// # }
+/// # fn tvector_compare(a: &[u8], b: &[u8], _p: &TvectorParams) -> Ordering { a.cmp(b) }
+/// # fn tvector_default(p: &TvectorParams) -> Result<String, String> {
+/// #     Ok(format!("[{}]", vec!["0"; p.dimension].join(",")))
+/// # }
+/// let t = villagesql::parameterized_type!(
 ///     type_name: "tvector",
 ///     max_persisted_length: 32768,
 ///     max_decode_buffer_length: 131_072,
@@ -2730,7 +2839,8 @@ macro_rules! custom_type {
 ///     params_parse: tvector_parse,
 ///     params_to_strings: tvector_to_strings,
 ///     intrinsic_default_fn: tvector_default,
-/// )
+/// );
+/// # let _ = t;
 /// ```
 ///
 /// See `tests/sdk_coverage` for two complete working types.
