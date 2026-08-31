@@ -2,7 +2,7 @@
 
 Safe Rust SDK for building VillageSQL extension functions (VDFs).
 
-The SDK handles all FFI marshaling so you work entirely in ordinary Rust types. Add it to your `Cargo.toml` as `villagesql = "0.0.1"`. See [`cargo-vsql`](https://crates.io/crates/cargo-vsql) for the companion CLI that packages and tests extensions.
+The SDK handles all FFI marshaling so you work entirely in ordinary Rust types. Add it with `cargo add villagesql`. See [`cargo-vsql`](https://crates.io/crates/cargo-vsql) for the companion CLI that packages and tests extensions.
 
 ## Writing an extension
 
@@ -21,6 +21,7 @@ cargo generate --git https://github.com/villagesql/vsql-extension-template-rust
 ```sh
 cargo new --lib my-extension
 cd my-extension
+cargo add villagesql
 ```
 
 Set the crate type in `Cargo.toml`:
@@ -37,9 +38,6 @@ edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]
-
-[dependencies]
-villagesql = "0.0.1"
 ```
 
 </details>

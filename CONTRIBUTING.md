@@ -64,6 +64,8 @@ The `check-bindings` CI job regenerates `bindings.rs` and runs `git diff --exit-
 - [ ] `cargo test` passes
 - [ ] CI is green
 - [ ] Publish to crates.io (see below)
+- [ ] Update the `villagesql` dependency pin in the Rust extension template
+      (`vsql-extension-template-rust/Cargo.toml`) to the version just published
 
 ## Publishing to crates.io
 
