@@ -37,25 +37,50 @@ const VTABLE_HASH: &[u8] = b"ver-1\0";
 const CONFIG_HASH: &[u8] = b"ver-1\0";
 
 /// One system variable an extension wants to declare.
+///
+/// The server prefixes every name with the extension's own, so a variable declared
+/// here as `enabled` is read as `@@global.<extension>.enabled` and set with
+/// `SET GLOBAL <extension>.enabled = ...`. `comment` is the text `SHOW VARIABLES`
+/// displays.
+///
+/// `on_change` is optional in every variant; pass `None` when nothing needs to happen
+/// at the moment a value is set.
 pub enum SysVarSpec {
+    /// A boolean variable, `ON` or `OFF` in SQL.
     Bool {
+        /// Variable name, without the extension prefix the server adds.
         name: &'static CStr,
+        /// Description shown by `SHOW VARIABLES`.
         comment: &'static CStr,
+        /// Value the variable holds until someone sets it.
         default: bool,
-        on_change: vef_sys_var_on_change_func_t, // optional callback for when the value changes
-    },
-    Int {
-        name: &'static CStr,
-        comment: &'static CStr,
-        default: i64,
-        min: i64,
-        max: i64,
+        /// Called after the value changes, or `None` to ignore changes.
         on_change: vef_sys_var_on_change_func_t,
     },
-    Str {
+    /// An integer variable, constrained to a range the server enforces.
+    Int {
+        /// Variable name, without the extension prefix the server adds.
         name: &'static CStr,
+        /// Description shown by `SHOW VARIABLES`.
         comment: &'static CStr,
+        /// Value the variable holds until someone sets it.
+        default: i64,
+        /// Lower bound of the range the server enforces.
+        min: i64,
+        /// Upper bound of the range the server enforces.
+        max: i64,
+        /// Called after the value changes, or `None` to ignore changes.
+        on_change: vef_sys_var_on_change_func_t,
+    },
+    /// A string variable.
+    Str {
+        /// Variable name, without the extension prefix the server adds.
+        name: &'static CStr,
+        /// Description shown by `SHOW VARIABLES`.
+        comment: &'static CStr,
+        /// Value the variable holds until someone sets it.
         default: &'static CStr,
+        /// Called after the value changes, or `None` to ignore changes.
         on_change: vef_sys_var_on_change_func_t,
     },
 }

@@ -3,8 +3,12 @@
 //!
 //! Based on the server header `villagesql/stable_sdk/v3/include/villagesql/
 //! abi/preview/status_var.h`.
-//! This is a preview capability. The ABI is version-gated via the 'version' field
-//! and may change in future versions.
+//! This is a preview capability; its ABI may change or be removed in future versions.
+//!
+//! Unlike `ping`, `keyring`, `sql_query` and `sys_var`, this module does not compare
+//! the vtable's `version` field against `VEF_PREVIEW_STATUS_VAR_ABI_VERSION`. The
+//! server still matches the `"ver-1"` tag below before populating anything, so a
+//! mismatched server leaves the capability unavailable rather than misread.
 
 use crate::preview::{Capability, RequiredCapability};
 use crate::sys::{
@@ -34,13 +38,18 @@ const CONFIG_HASH: &[u8] = b"ver-1\0";
 pub struct AtomicF64(AtomicU64);
 
 impl AtomicF64 {
+    /// Create one holding `v`. `const`, so it can initialize a `static`.
     #[must_use]
     pub const fn new(v: f64) -> Self {
         Self(AtomicU64::new(v.to_bits()))
     }
+
+    /// Replace the stored value.
     pub fn store(&self, v: f64, order: Ordering) {
         self.0.store(v.to_bits(), order);
     }
+
+    /// Read the stored value.
     #[must_use]
     pub fn load(&self, order: Ordering) -> f64 {
         f64::from_bits(self.0.load(order))
@@ -52,13 +61,25 @@ impl AtomicF64 {
 
 /// One status variable an extension declares. The extension owns the counter (a
 /// `'static` atomic); the server reads it live at `SHOW STATUS`.
+///
+/// The server prefixes every name with the extension's own, so a variable declared
+/// here as `requests` appears in `SHOW STATUS` as `<extension>.requests`.
+///
+/// The counter must be a `static`, because the server keeps the pointer and reads
+/// through it long after registration returns.
 pub enum StatusVarSpec {
+    /// An integer status variable, such as a request counter.
     Int {
+        /// Variable name, without the extension prefix the server adds.
         name: &'static CStr,
+        /// The counter the server reads. Update it from your own code.
         value: &'static AtomicI64,
     },
+    /// A floating-point status variable, such as a load or ratio gauge.
     Double {
+        /// Variable name, without the extension prefix the server adds.
         name: &'static CStr,
+        /// The gauge the server reads. Update it from your own code.
         value: &'static AtomicF64,
     },
 }

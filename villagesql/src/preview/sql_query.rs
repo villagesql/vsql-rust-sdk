@@ -31,6 +31,9 @@ pub struct SqlQueryCapability {
 }
 
 impl SqlQueryCapability {
+    /// Create the capability in its unpopulated state. `const`, so it can
+    /// initialize the `static` the extension declares. The server fills it in at
+    /// registration, provided the extension named it in `requires:`.
     #[must_use]
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
@@ -307,8 +310,11 @@ impl<'r> Row<'r> {
 /// Severity of a SQL diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagSeverity {
+    /// Informational. The statement succeeded.
     Note,
+    /// The statement succeeded, but the server has something to report.
     Warning,
+    /// The statement failed.
     Error,
 }
 
@@ -316,9 +322,13 @@ pub enum DiagSeverity {
 /// out of server storage (owned), so a `Diag` outlives the `QueryResult`.
 #[derive(Debug, Clone)]
 pub struct Diag {
+    /// The MySQL error number, such as `1146` for an unknown table.
     pub errno: u32,
+    /// Whether this is the statement's error, or a warning or note beside it.
     pub severity: DiagSeverity,
+    /// The five-character SQLSTATE, such as `42S02`.
     pub sqlstate: String,
+    /// The human-readable message text.
     pub message: String,
 }
 

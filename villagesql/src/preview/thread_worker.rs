@@ -33,11 +33,20 @@ fn duration_to_ms(d: Duration) -> u32 {
 }
 
 /// Why the server woke up your worker.
+///
+/// A worker panicking is caught rather than unwinding into the server, and the wakeup
+/// is then treated as [`NextWakeup::unchanged`]. The panic is not reported anywhere,
+/// so log anything you need to know about before returning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WakeupReason {
+    /// The worker's control system variable was switched on. This is the first
+    /// wakeup, and the place to do setup.
     Enable,
+    /// The sleep interval elapsed. This is the ordinary tick.
     Periodic,
+    /// The file descriptor the worker asked to watch became ready.
     PollFd,
+    /// The control variable was switched off. Last wakeup; clean up here.
     Disable,
 }
 
