@@ -1248,6 +1248,20 @@ macro_rules! custom {
 /// Declare a `VillageSQL` extension and generate the `vef_register` /
 /// `vef_unregister` C entry points.
 ///
+/// Call this once, at the top level of your crate. Everything the extension
+/// offers goes in one of its three lists.
+///
+/// # Keys
+///
+/// | Key | Holds | Required |
+/// |---|---|---|
+/// | `funcs:` | [`func!`], [`agg_func!`], and [`varargs_func!`] descriptors | yes |
+/// | `types:` | [`custom_type!`] and [`parameterized_type!`] descriptors | no, defaults to empty |
+/// | `requires:` | preview capabilities to request from the server | no, defaults to empty |
+///
+/// The extension's own name and version are not declared here. The server reads
+/// both from the `manifest.json` in the packaged `.veb`.
+///
 /// ```ignore
 /// villagesql::extension! {
 ///     funcs: [
@@ -1266,7 +1280,28 @@ macro_rules! custom {
 /// }
 /// ```
 ///
-/// The `types:` list is optional; omitting it is equivalent to `types: []`.
+/// # Requesting a preview capability
+///
+/// `requires:` takes a reference to each capability the extension uses. At
+/// registration the server resolves every one and writes back a function table;
+/// the capability's own methods then work. See the [`preview`] module.
+///
+/// ```ignore
+/// use villagesql::preview::ping::PingCapability;
+///
+/// static PING: PingCapability = PingCapability::new();
+///
+/// villagesql::extension! {
+///     funcs: [
+///         villagesql::func!(ping_impl, "my_ping", [] -> villagesql::Type::Int),
+///     ],
+///     requires: [&PING],
+/// }
+/// ```
+///
+/// An extension that names any capability will not install unless the server was
+/// started with `vsql_allow_preview_extensions=ON`. Without it, `INSTALL EXTENSION`
+/// fails and nothing in the extension loads.
 #[macro_export]
 macro_rules! extension {
     // Canonical form: funcs + types + requires.
@@ -1332,11 +1367,8 @@ macro_rules! extension {
 
 /// Build a [`FuncDescriptor`] for one VDF and generate its `extern "C"` trampoline.
 ///
-/// A function may carry per-statement state: `state:` names the type (allocated
-/// in `prerun`, borrowed by each row, dropped after the last row). `prerun:`
-/// names the setup fn. Optionally, `postrun:` names a `fn(&mut State)` that runs
-/// teardown after the last row, before the automatic drop. It runs ahead of the
-/// drop, it does not replace it.
+/// The first three arguments are always the same: the Rust function, the name SQL
+/// will call it by, and the signature as `[params] -> return`.
 ///
 /// ```ignore
 /// villagesql::func!(impl_fn, "sql_name", [villagesql::Type::String] -> villagesql::Type::String)
@@ -1346,6 +1378,57 @@ macro_rules! extension {
 /// villagesql::func!(impl_fn, "sql_name", [] -> villagesql::Type::Int,
 ///             state: MyState, prerun: my_prerun, postrun: my_postrun)
 /// ```
+///
+/// # Optional keys
+///
+/// | Key | Meaning | Default |
+/// |---|---|---|
+/// | `buffer_size:` | Bytes the server reserves for the result. `0` asks for the server default. | `0` |
+/// | `deterministic:` | Whether the same arguments always give the same answer. | `false` |
+/// | `state:` | Type of the value carried across every row of one statement. | none |
+/// | `prerun:` | Function that allocates that value before the first row. | none |
+/// | `postrun:` | Function that runs teardown after the last row, before the SDK drops the state. | none |
+///
+/// Set `deterministic: true` only for a pure function. The server refuses a
+/// non-deterministic VDF in a generated column or a `CHECK` constraint, so the flag
+/// decides where the function may be used.
+///
+/// Prefer computing `buffer_size` from the data rather than writing a round number.
+///
+/// # Carrying state across a statement
+///
+/// `state:` and `prerun:` go together, and they change the row function's signature
+/// from `fn(&[InValue]) -> VdfReturn` to `fn(&mut T, &[InValue]) -> VdfReturn`.
+///
+/// The server calls the prerun function once, before the first row. It allocates the
+/// state and hands it over with [`PrerunResult::set_state`]. Every row then borrows
+/// that value, and the SDK drops it after the last row of the statement. You do not
+/// free it yourself.
+///
+/// Prerun is also where you reject bad calls, with [`PrerunResult::error`], and where
+/// you can size the result buffer from the actual arguments, with
+/// [`PrerunResult::request_buffer_size`].
+///
+/// `postrun:` names an optional `fn(&mut T)` that the SDK calls once after the last
+/// row, before it drops the state. Use it for teardown that has to happen while the
+/// state is still borrowable. It runs ahead of the drop; it does not replace it.
+///
+/// ```ignore
+/// // Counts how many rows this statement has processed.
+/// fn setup(_args: villagesql::PrerunArgs, out: villagesql::PrerunResult<u64>) {
+///     out.set_state(0u64);
+/// }
+///
+/// fn call_index(state: &mut u64, _args: &[villagesql::InValue]) -> villagesql::VdfReturn {
+///     *state += 1;
+///     villagesql::VdfReturn::int(*state as i64)
+/// }
+///
+/// villagesql::func!(call_index, "call_index", [] -> villagesql::Type::Int,
+///     state: u64, prerun: setup)
+/// ```
+///
+/// See `examples/vsql_call_index` for the complete crate.
 #[macro_export]
 macro_rules! func {
     // Prerun form: a function that owns per-statement state (setup in prerun,
@@ -1503,15 +1586,37 @@ macro_rules! func {
     };
 }
 
-/// Declare an aggregate SQL function (SUM/COUNT-style). The first ident is the
-/// result fn (`fn(&State) -> VdfReturn`), which produces each group's value.
-/// `state:` names the accumulator (must implement `Default`). `clear:` resets
-/// it at the start of each group. `accumulate:` folds one row.
+/// Declare an aggregate SQL function, in the shape of `SUM` or `COUNT`.
+///
+/// An aggregate is written as three functions over one accumulator, rather than the
+/// single row function [`func!`] takes.
+///
+/// | Part | Signature | When the server calls it |
+/// |---|---|---|
+/// | the first argument | `fn(&State) -> VdfReturn` | once per group, after the last row |
+/// | `clear:` | `fn(&mut State)` | at the start of each group |
+/// | `accumulate:` | `fn(&mut State, &[InValue])` | once per row |
+/// | `state:` | a type implementing [`Default`] | allocated before the first row, dropped after the last |
+///
+/// The accumulator starts at `State::default()`. `clear:` still has to reset it,
+/// because one statement can produce many groups and the same accumulator is reused
+/// for each.
 ///
 /// ```ignore
 /// villagesql::agg_func!(my_sum_result, "my_sum", [villagesql::Type::Int] -> villagesql::Type::Int,
 ///     state: SumState, clear: my_sum_clear, accumulate: my_sum_acc)
 /// ```
+///
+/// `buffer_size:` and `deterministic:` may follow, meaning the same as in [`func!`],
+/// and both must be given together:
+///
+/// ```ignore
+/// villagesql::agg_func!(my_sum_result, "my_sum", [villagesql::Type::Int] -> villagesql::Type::Int,
+///     state: SumState, clear: my_sum_clear, accumulate: my_sum_acc,
+///     buffer_size: 64, deterministic: true)
+/// ```
+///
+/// See `examples/vsql_agg_sum` for the complete crate.
 #[macro_export]
 macro_rules! agg_func {
     // Full form: result-buffer size and determinism specified.
@@ -1585,14 +1690,57 @@ macro_rules! agg_func {
     };
 }
 
-/// Declare a varargs VDF. The function accepts any number of arguments. The
-/// `prerun` hook is responsible for validating the count and types
-/// (the server does none). `state:` names the per-statement value the function
-/// carries across every row of one statement, allocated in `prerun`, borrowed
-/// by each row call, and then dropped after the statement. `prerun:` names the
-/// setup function. Optionally, `postrun:` names a `fn(&mut State)` that runs
-/// teardown after the last row, before the automatic drop (it runs ahead of the
-/// drop, it does not replace it).
+/// Declare a VDF that accepts any number of arguments. The parameter list is
+/// written as `[..]`.
+///
+/// **The server checks nothing about the arguments.** It does not check how many
+/// there are and it does not check their types, because a varargs function declares
+/// no signature to check against. Whatever SQL passes arrives in the slice. If the
+/// function needs a minimum count, or strings rather than integers, `prerun:` is the
+/// only place that can say so.
+///
+/// # Forms
+///
+/// | Form | Use it when |
+/// |---|---|
+/// | `prerun:` and `state:` | The function validates its arguments and carries a value across the statement's rows |
+/// | `prerun:` alone | The function validates its arguments but keeps nothing between rows |
+/// | Neither | The function accepts whatever it is given |
+///
+/// Any form may end with `buffer_size:` and `deterministic:` together, meaning the
+/// same as in [`func!`].
+///
+/// With `state:`, the row function takes `fn(&mut T, &[InValue]) -> VdfReturn`.
+/// Without it, `fn(&[InValue]) -> VdfReturn`. A `state:` form may also name
+/// `postrun:`, which means the same as it does in [`func!`].
+///
+/// # Validating in prerun
+///
+/// [`PrerunArgs`] reports the count and the type of each argument, and
+/// [`PrerunResult::error`] rejects the call before any row runs. Prerun is also where
+/// the result buffer can be sized from the actual argument count.
+///
+/// ```ignore
+/// fn str_join_prerun(args: villagesql::PrerunArgs, mut out: villagesql::PrerunResult<JoinState>) {
+///     if args.is_empty() {
+///         out.error("str_join requires at least one argument");
+///         return;
+///     }
+///     for i in 0..args.len() {
+///         if !args.type_at(i).is_some_and(|t| t.is_str()) {
+///             out.error("str_join: every argument must be a string");
+///             return;
+///         }
+///     }
+///     out.request_buffer_size(32 + args.len() * 64);
+///     out.set_state(JoinState::default());
+/// }
+///
+/// villagesql::varargs_func!(str_join, "str_join", [..] -> villagesql::Type::String,
+///     state: JoinState, prerun: str_join_prerun)
+/// ```
+///
+/// See `examples/vsql_varargs` for the complete crate.
 #[macro_export]
 macro_rules! varargs_func {
     // State and author postrun (full form).
@@ -2291,6 +2439,81 @@ macro_rules! __vsql_type_vdfs_typed {
     }};
 }
 
+/// Define a custom SQL type of fixed size, and the SQL functions that operate on it.
+///
+/// A custom type is a type the server does not know: your code decides how a value is
+/// written as bytes on disk, how those bytes read back as text, and how two of them
+/// order against each other. Use [`parameterized_type!`] instead when the size depends
+/// on parameters written in the column declaration, as in `TVECTOR(768)`.
+///
+/// Custom types work only in `InnoDB` tables. The server rejects a `CREATE TABLE` or
+/// `ALTER TABLE` that puts one in any other storage engine.
+///
+/// # Required keys
+///
+/// | Key | Meaning |
+/// |---|---|
+/// | `type_name:` | The name SQL uses, as a string literal |
+/// | `persisted_length:` | Exact bytes every stored value occupies |
+/// | `max_decode_buffer_length:` | Longest text form `decode` can produce, in bytes |
+/// | `encode:` | `fn(&str) -> Result<Vec<u8>, String>` — text to stored bytes |
+/// | `decode:` | `fn(&[u8]) -> Result<String, String>` — stored bytes back to text |
+/// | `compare:` | `fn(&[u8], &[u8]) -> std::cmp::Ordering` — the type's ordering |
+///
+/// # Optional keys
+///
+/// | Key | Meaning |
+/// |---|---|
+/// | `hash:` | `fn(&[u8]) -> usize`. Without it the server hashes the raw bytes. |
+/// | `default:` | The type's default value, as a text literal |
+/// | `intrinsic_default_fn:` | `fn() -> Result<String, String>`, when the default must be computed |
+///
+/// **Give a `hash:` function if values contain floating point.** The fallback hashes
+/// the stored bytes, and `-0.0` and `+0.0` have different bytes while `compare` calls
+/// them equal. That disagreement produces wrong `GROUP BY` and `COUNT(DISTINCT)`
+/// results. Normalize inside the hash function: `v = if v == 0.0 { 0.0 } else { v }`.
+///
+/// **Give a default, one way or the other.** At type initialization the server encodes
+/// the default value; with neither key it encodes the empty string, which most `encode`
+/// functions reject, and the type fails to initialize. Whichever text you supply must
+/// encode to exactly `persisted_length` bytes.
+///
+/// Use `default:` for a value you can write down, and `intrinsic_default_fn:` for one
+/// that has to be computed. Give one or the other, not both.
+///
+/// # Generated SQL functions
+///
+/// The macro also registers these, named after the type. They are callable from SQL and
+/// are how the server reaches your code.
+///
+/// | Function | Backed by |
+/// |---|---|
+/// | `<type>::from_string` | `encode:` |
+/// | `<type>::to_string` | `decode:` |
+/// | `<type>::compare` | `compare:` |
+/// | `<type>::hash` | `hash:`, when given |
+/// | `<type>::intrinsic_default` | `intrinsic_default_fn:`, when given |
+///
+/// Refer to the type in a function signature with the [`custom!`] macro, not by name.
+///
+/// A text result is written by length, not as a C string, so
+/// `max_decode_buffer_length` needs no extra byte for a terminator. Returning more
+/// than it allows fails the statement rather than truncating the value.
+///
+/// ```ignore
+/// villagesql::custom_type!(
+///     type_name: "counter",
+///     persisted_length: 8,
+///     max_decode_buffer_length: 20,
+///     encode: counter_encode,
+///     decode: counter_decode,
+///     compare: counter_compare,
+///     hash: counter_hash,
+///     intrinsic_default_fn: counter_default,
+/// )
+/// ```
+///
+/// See `examples/vsql_rational` for the complete crate.
 #[macro_export]
 macro_rules! custom_type {
     (
@@ -2355,9 +2578,87 @@ macro_rules! custom_type {
     }};
 }
 
-/// Defines a parameterized custom SQL type. Like [`custom_type!`], but the
-/// persisted length is computed per-column from type parameters via
-/// `int_to_params` / `resolve_params` instead of being a fixed constant.
+/// Define a custom SQL type whose size comes from parameters in the column
+/// declaration, as in `TVECTOR(768)`.
+///
+/// Like [`custom_type!`], except that the stored size is not a constant. Each column
+/// declares parameters, and this type works out from them how many bytes a value of
+/// that column takes. Two columns of the same type with different parameters are
+/// different types to the server and will not compare against each other.
+///
+/// # How a declaration is resolved
+///
+/// 1. SQL says `TVECTOR(768)`. The single integer reaches `int_to_params:`, which
+///    turns it into a named parameter string such as `dimension=768`. A declaration
+///    written as `key=value` pairs skips this step.
+/// 2. `resolve_params:` receives those parameters and returns a [`Resolved`] giving
+///    the persisted length and the decode buffer length for this column. It also
+///    validates them; returning `Err` rejects the DDL with your message.
+/// 3. `params_parse:` turns the parameter string into your own typed struct, once,
+///    cached thereafter. Every later call gets that struct rather than re-parsing.
+///
+/// [`Resolved::rewrite`] is the form to return when resolution fills in a default.
+/// The rewritten parameters are what the server persists, so a column declared
+/// `TVECTOR(768)` can record `dimension=768,type=float` and never depend on the
+/// default again.
+///
+/// # Required keys
+///
+/// | Key | Meaning |
+/// |---|---|
+/// | `type_name:` | The name SQL uses, as a string literal |
+/// | `max_persisted_length:` | The largest a value can be, over every legal parameter set |
+/// | `max_decode_buffer_length:` | The longest text form, over every legal parameter set, in bytes |
+/// | `encode:` | `fn(&str, &mut MaybeParams<P>) -> Result<Vec<u8>, String>` |
+/// | `decode:` | `fn(&[u8], &P) -> Result<String, String>` |
+/// | `compare:` | `fn(&[u8], &[u8], &P) -> std::cmp::Ordering` |
+/// | `int_to_params:` | `fn(i64) -> Result<String, String>` — the `TVECTOR(768)` shorthand |
+/// | `resolve_params:` | `fn(Params) -> Result<Resolved, String>` — validate and size |
+/// | `params_type:` | Your parsed parameter struct, `P` |
+/// | `params_parse:` | `fn(Params) -> P` |
+/// | `params_to_strings:` | `fn(&P) -> Vec<(String, String)>` — `P` back to pairs |
+///
+/// Note the two differences from [`custom_type!`] that are easy to miss: the size key
+/// is `max_persisted_length`, not `persisted_length`, and `decode`, `compare`, and
+/// `hash` all take the parsed parameters as a final argument.
+///
+/// # Optional keys
+///
+/// | Key | Meaning |
+/// |---|---|
+/// | `hash:` | `fn(&[u8], &P) -> usize`. Required in practice for floating-point data — see [`custom_type!`]. |
+/// | `default:` | The type's default value, as a text literal |
+/// | `intrinsic_default_fn:` | `fn(&P) -> Result<String, String>`, computed per parameter set |
+///
+/// A parameterized type usually needs `intrinsic_default_fn:` rather than `default:`,
+/// because the right default depends on the parameters. A 768-element vector and a
+/// 4-element vector do not share one.
+///
+/// # Encoding a bare literal
+///
+/// `encode:` takes [`MaybeParams`] rather than the parameters directly, because a
+/// literal with no column to anchor it has none yet. Call [`MaybeParams::is_known`]
+/// first. When the parameters are unknown, work them out from the value and record
+/// them with [`MaybeParams::set`]; the SDK reports them back to the server.
+///
+/// ```ignore
+/// villagesql::parameterized_type!(
+///     type_name: "tvector",
+///     max_persisted_length: 32768,
+///     max_decode_buffer_length: 131_072,
+///     encode: tvector_encode,
+///     decode: tvector_decode,
+///     compare: tvector_compare,
+///     int_to_params: tvector_int_to_params,
+///     resolve_params: tvector_resolve_params,
+///     params_type: TvectorParams,
+///     params_parse: tvector_parse,
+///     params_to_strings: tvector_to_strings,
+///     intrinsic_default_fn: tvector_default,
+/// )
+/// ```
+///
+/// See `tests/sdk_coverage` for two complete working types.
 #[macro_export]
 macro_rules! parameterized_type {
     (
