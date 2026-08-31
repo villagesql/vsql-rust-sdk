@@ -25,7 +25,7 @@ use villagesql_sys::{
     vef_return_value_type_t_VEF_RESULT_VALUE, vef_return_value_type_t_VEF_RESULT_WARNING,
     vef_signature_t, vef_type_desc_t, vef_type_id_VEF_TYPE_CUSTOM, vef_type_id_VEF_TYPE_INT,
     vef_type_id_VEF_TYPE_REAL, vef_type_id_VEF_TYPE_STRING, vef_type_params_t, vef_type_t,
-    vef_vdf_args_t, vef_vdf_result_t, vef_version_t, VEF_MAX_ERROR_LEN,
+    vef_vdf_args_t, vef_vdf_result_t, VEF_MAX_ERROR_LEN,
 };
 
 use crate::preview::RequiredCapability;
@@ -1086,12 +1086,7 @@ pub unsafe fn build_registration(
         protocol: vef_protocol_t_VEF_PROTOCOL_3,
         error_msg: std::ptr::null_mut(),
         deprecated_extension_version: std::ptr::null(),
-        sdk_version: vef_version_t {
-            major: 0,
-            minor: 0,
-            patch: 1,
-            extra: std::ptr::null(),
-        },
+        sdk_version: villagesql_sys::SDK_VERSION,
         deprecated_extension_name: std::ptr::null(),
         func_count,
         funcs: funcs_ptr,

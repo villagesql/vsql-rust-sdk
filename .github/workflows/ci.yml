@@ -110,6 +110,29 @@ jobs:
           path: ~/.cargo/bin/cargo-vsql
           key: cargo-vsql-${{ runner.os }}-${{ hashFiles('cargo-vsql/src/**', 'cargo-vsql/Cargo.toml') }}
 
+  check-vendored-headers:
+    name: Check vendored headers match the server
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Read the server release the headers came from
+        id: sdk
+        run: ./scripts/sdk-version.sh >> "$GITHUB_OUTPUT"
+
+      - name: Check out that server release
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: villagesql/villagesql-server
+          ref: release/${{ steps.sdk.outputs.version }}
+          path: server
+          sparse-checkout: villagesql/stable_sdk/v3/include/villagesql/abi
+          sparse-checkout-cone-mode: false
+
+      - name: Diff vendored ABI headers against that release
+        run: ./scripts/check-vendored-headers.sh server
+
   package:
     name: Package ${{ matrix.name }}
     runs-on: ubuntu-latest
