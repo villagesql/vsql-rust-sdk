@@ -671,6 +671,7 @@ unsafe fn read_in_values(args: &vef_vdf_args_t) -> Vec<InValue<'_>> {
     }
     in_values
 }
+
 /// Convert raw Protocol-3 VDF arguments into a `&[InValue]` slice and call `f`.
 ///
 /// # Safety
@@ -880,6 +881,25 @@ pub unsafe fn dispatch_intrinsic_default_typed<P>(
     };
 
     let ret = match default_fn(&params) {
+        Ok(s) => VdfReturn::String(s),
+        Err(e) => VdfReturn::error(e),
+    };
+    write_result(ret, result);
+}
+
+/// Dispatch a non-parameterized type's intrinsic-default VDF. Compute the
+/// type's default value as a string. The server calls this once, then encodes
+/// the string via `from_string`.
+///
+/// # Safety
+/// `result` must be valid for the duration of the call.
+pub unsafe fn dispatch_intrinsic_default(
+    default_fn: fn() -> Result<String, String>,
+    _args: *mut vef_vdf_args_t,
+    result: *mut vef_vdf_result_t,
+) {
+    let result = &mut *result;
+    let ret = match default_fn() {
         Ok(s) => VdfReturn::String(s),
         Err(e) => VdfReturn::error(e),
     };
@@ -1568,6 +1588,7 @@ macro_rules! __vsql_type_vdfs {
         decode: $dec_fn:ident,
         compare: $cmp_fn:ident
         $(, hash: $hash_fn:ident)?
+        $(, intrinsic_default_fn: $default_fn:ident)?
         $(,)?
     ) => {{
         $crate::paste::paste! {
@@ -1674,6 +1695,18 @@ macro_rules! __vsql_type_vdfs {
                     &[$crate::custom!($type_name)];
             )?
 
+            // TYPE::intrinsic_default() -> STRING (optional)
+            $(
+                unsafe extern "C" fn [< __vsql_trampoline_intrinsic_default_ $default_fn >](
+                    _ctx: *mut $crate::sys::vef_context_t,
+                    args: *mut $crate::sys::vef_vdf_args_t,
+                    result: *mut $crate::sys::vef_vdf_result_t,
+                ) {
+                    $crate::dispatch_intrinsic_default($default_fn, args, result);
+                }
+                static [< __VSQL_INTRINSIC_DEFAULT_PARAMS_ $default_fn:upper >]: &[$crate::Type] = &[];
+            )?
+
             // Register them, evaluate to the Vec
             #[allow(unused_mut)]
             let mut __embedded: ::std::vec::Vec<$crate::FuncDescriptor> =
@@ -1736,7 +1769,22 @@ macro_rules! __vsql_type_vdfs {
                     accumulate: None,
                 });
             )?
-
+            $(
+                __embedded.push($crate::FuncDescriptor {
+                    sql_name: concat!($type_name, "::intrinsic_default\0").as_bytes().as_ptr()
+                        as *const ::std::os::raw::c_char,
+                    params: [< __VSQL_INTRINSIC_DEFAULT_PARAMS_ $default_fn:upper >],
+                    returns: $crate::Type::String,
+                    trampoline: [< __vsql_trampoline_intrinsic_default_ $default_fn >],
+                    buffer_size: 0,
+                    deterministic: true,
+                    varargs: false,
+                    prerun: None,
+                    postrun: None,
+                    clear: None,
+                    accumulate: None,
+                });
+            )?
             __embedded
         }
     }};
@@ -2055,6 +2103,7 @@ macro_rules! custom_type {
         compare: $cmp_fn:ident
         $(, hash: $hash_fn:ident)?
         $(, default: $default_str:literal)?
+        $(, intrinsic_default_fn: $default_fn:ident)?
         $(,)?
     ) => {{
         let __embedded = $crate::__vsql_type_vdfs!(
@@ -2063,6 +2112,7 @@ macro_rules! custom_type {
             decode: $dec_fn,
             compare: $cmp_fn
             $(, hash: $hash_fn)?
+            $(, intrinsic_default_fn: $default_fn)?
         );
 
         #[allow(unused_mut)]
@@ -2075,6 +2125,12 @@ macro_rules! custom_type {
         $( let _ = stringify!($hash_fn);
            __hash_vdf_name = concat!($type_name, "::hash\0").as_bytes().as_ptr()
             as *const ::std::ffi::c_char; )?
+
+        #[allow(unused_mut)]
+        let mut __intrinsic_default_vdf_name: *const ::std::ffi::c_char = ::std::ptr::null();
+        $( let _ = stringify!($default_fn);
+            __intrinsic_default_vdf_name = concat!($type_name, "::intrinsic_default\0").as_bytes().as_ptr()
+                as *const ::std::ffi::c_char; )?
 
         $crate::TypeWithFuncs {
             descriptor: $crate::TypeDescriptor {
@@ -2092,7 +2148,7 @@ macro_rules! custom_type {
                 int_to_params_vdf_name: ::std::ptr::null(),
                 resolve_params_vdf_name: ::std::ptr::null(),
                 intrinsic_default_str: __default,
-                intrinsic_default_vdf_name: ::std::ptr::null(),
+                intrinsic_default_vdf_name: __intrinsic_default_vdf_name,
                 max_persisted_length: 0,
             },
             embedded_funcs: __embedded,

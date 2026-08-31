@@ -68,6 +68,10 @@ pub fn counter_hash(b: &[u8]) -> usize {
     i64::from_le_bytes(b[..8].try_into().unwrap()) as usize
 }
 
+pub fn counter_default() -> Result<String, String> {
+    Ok("0".to_string())
+}
+
 // ── Type 2: flag (1 byte bool, "true"/"false") ────────────────────────────────
 
 pub fn flag_encode(s: &str) -> Result<Vec<u8>, String> {
@@ -367,7 +371,7 @@ villagesql::extension! {
             decode: counter_decode,
             compare: counter_compare,
             hash: counter_hash,
-            default: "0",
+            intrinsic_default_fn: counter_default,
         ),
         villagesql::custom_type!(
             type_name: "flag",
