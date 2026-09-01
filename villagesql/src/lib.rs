@@ -69,9 +69,12 @@
 //!
 //! These are gated on both sides. The server refuses to install any extension that
 //! declares a capability unless it was started with
-//! `vsql_allow_preview_extensions=ON`, and each wrapper reports
-//! `CapabilityUnavailable` if the running server is too old to provide it. The
-//! interfaces may change between releases, which is what "preview" means here.
+//! `vsql_allow_preview_extensions=ON`. A wrapper that calls into the server reports a
+//! missing or too-old capability: the keyring returns
+//! [`KeyringError::CapabilityUnavailable`](preview::keyring::KeyringError::CapabilityUnavailable),
+//! and the rest return `None`. Status variables and background threads register once
+//! and make no such call. The interfaces may change between releases, which is what
+//! "preview" means here.
 //!
 //! See the [`preview`] module for the list, and `examples/vsql_ping` for the smallest
 //! working case.
