@@ -797,6 +797,20 @@ pub unsafe fn dispatch_postrun<T>(args: *mut vef_postrun_args_t) {
     reclaim_state::<T>((*args).user_data);
 }
 
+/// Postrun runner that first calls the author's teardown hook, then reclaims
+/// and drops the state. The hook borrows the state, so the guaranteed Drop
+/// still runs immediately after.
+///
+/// # Safety
+/// `args` is valid (set by prerun). `T` matches what prerun set.
+pub unsafe fn dispatch_postrun_with_hook<T>(f: fn(&mut T), args: *mut vef_postrun_args_t) {
+    let raw = (*args).user_data;
+    if !raw.is_null() {
+        f(borrow_state::<T>(raw));
+    }
+    reclaim_state::<T>(raw);
+}
+
 /// Aggregate prerun: allocate the accumulator at its default value.
 ///
 /// # Safety
@@ -1318,15 +1332,26 @@ macro_rules! extension {
 
 /// Build a [`FuncDescriptor`] for one VDF and generate its `extern "C"` trampoline.
 ///
+/// A function may carry per-statement state: `state:` names the type (allocated
+/// in `prerun`, borrowed by each row, dropped after the last row). `prerun:`
+/// names the setup fn. Optionally, `postrun:` names a `fn(&mut State)` that runs
+/// teardown after the last row, before the automatic drop. It runs ahead of the
+/// drop, it does not replace it.
+///
 /// ```ignore
 /// villagesql::func!(impl_fn, "sql_name", [villagesql::Type::String] -> villagesql::Type::String)
 /// villagesql::func!(impl_fn, "sql_name", [villagesql::custom!("my_type")] -> villagesql::custom!("my_type"),
 ///             deterministic: true)
+/// // stateful, with setup and optional teardown before the automatic drop:
+/// villagesql::func!(impl_fn, "sql_name", [] -> villagesql::Type::Int,
+///             state: MyState, prerun: my_prerun, postrun: my_postrun)
 /// ```
 #[macro_export]
 macro_rules! func {
     // Prerun form: a function that owns per-statement state (setup in prerun,
-    // auto-freed in postrun). `state:` names the state type. `prerun:` names the setup fn.
+    // auto-freed after the last row). `state:` names the state type. `prerun:`
+    // names the setup fn. See the arm below for an optional author `postrun:`
+    // hook that runs teardown just before auto-free.
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
      state: $state:ty,  prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
         $crate::paste::paste! {
@@ -1377,6 +1402,58 @@ macro_rules! func {
      state: $state:ty, prerun: $prerun:ident) => {
         $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
             state: $state, prerun: $prerun, buffer_size: 0, deterministic: false)
+    };
+    // Prerun and author postrun: state with custom teardown that runs before
+    // the automatic drop. `postrun:` names a fn(&mut State).
+    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
+     state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident,
+     buffer_size: $bs:expr, deterministic: $det:expr) => {{
+        $crate::paste::paste! {
+            unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
+            }
+            unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_prerun_args_t,
+                result: *mut $crate::sys::vef_prerun_result_t,
+            ) {
+                $crate::dispatch_prerun::<$state>($prerun, args, result);
+            }
+            unsafe extern "C" fn [< __vsql_postrun_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_postrun_args_t,
+                _result: *mut $crate::sys::vef_postrun_result_t,
+            ) {
+                $crate::dispatch_postrun_with_hook::<$state>($postrun, args);
+            }
+            static [< __VSQL_PARAMS_ $impl_fn:upper >]: &[$crate::Type] = &[$($param),*];
+            $crate::FuncDescriptor {
+                sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: [< __VSQL_PARAMS_ $impl_fn:upper >],
+                returns: $ret,
+                trampoline: [< __vsql_trampoline_ $impl_fn >],
+                buffer_size: $bs,
+                deterministic: $det,
+                varargs: false,
+                prerun: Some([< __vsql_prerun_ $impl_fn >]),
+                postrun: Some([< __vsql_postrun_ $impl_fn >]),
+                clear: None,
+                accumulate: None,
+            }
+        }
+    }};
+
+    // Prerun and postrun, defaults (server buffer size, non-deterministic).
+    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
+        state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident) => {
+            $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
+                state: $state, prerun: $prerun, postrun: $postrun,
+                buffer_size: 0, deterministic: false)
     };
     // Full form: declare the result-buffer size and determinism. `buffer_size`
     // is a plain value (ideally computed from data, not a magic literal); 0
@@ -1513,9 +1590,61 @@ macro_rules! agg_func {
 /// (the server does none). `state:` names the per-statement value the function
 /// carries across every row of one statement, allocated in `prerun`, borrowed
 /// by each row call, and then dropped after the statement. `prerun:` names the
-/// setup function.
+/// setup function. Optionally, `postrun:` names a `fn(&mut State)` that runs
+/// teardown after the last row, before the automatic drop (it runs ahead of the
+/// drop, it does not replace it).
 #[macro_export]
 macro_rules! varargs_func {
+    // State and author postrun (full form).
+    ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
+     state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident,
+     buffer_size: $bs:expr, deterministic: $det:expr) => {{
+        $crate::paste::paste! {
+            unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
+            }
+            unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_prerun_args_t,
+                result: *mut $crate::sys::vef_prerun_result_t,
+            ) {
+                $crate::dispatch_prerun::<$state>($prerun, args, result);
+            }
+            unsafe extern "C" fn [< __vsql_postrun_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_postrun_args_t,
+                _result: *mut $crate::sys::vef_postrun_result_t,
+            ) {
+                $crate::dispatch_postrun_with_hook::<$state>($postrun, args);
+            }
+            $crate::FuncDescriptor {
+                sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: &[],
+                returns: $ret,
+                trampoline: [< __vsql_trampoline_ $impl_fn >],
+                buffer_size: $bs,
+                deterministic: $det,
+                varargs: true,
+                prerun: Some([< __vsql_prerun_ $impl_fn >]),
+                postrun: Some([< __vsql_postrun_ $impl_fn >]),
+                clear: None,
+                accumulate: None,
+            }
+        }
+    }};
+
+    // State + author postrun (shorthand).
+    ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
+     state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident) => {
+        $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
+            state: $state, prerun: $prerun, postrun: $postrun,
+            buffer_size: 0, deterministic: false)
+    };
     // Full form: buffer size + determinism specified.
     ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
      state: $state:ty, prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{

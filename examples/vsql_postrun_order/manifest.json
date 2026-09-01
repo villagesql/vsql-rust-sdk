@@ -1,0 +1,7 @@
+{
+    "name": "vsql_postrun_order",
+    "version": "0.1.0",
+    "description": "Example VillageSQL extension: proves the author-supplied postrun hok before the automatic drop",
+    "author": "VillageSQL Community",
+    "license": "GPL-2.0"
+}

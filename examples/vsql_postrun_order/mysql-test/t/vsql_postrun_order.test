@@ -1,0 +1,18 @@
+# Proves the author-supplied postrun hook runs, fires before the automatic
+# Drop, and still has live access to the accumulated state.
+
+INSTALL EXTENSION vsql_postrun_order;
+
+CREATE TABLE t (id INT);
+INSERT INTO t VALUES (1), (2), (3);
+
+--echo # Run the stateful VDF across 3 rows: prerun -> 3 row calls -> postrun -> drop.
+SELECT SUM(vsql_postrun_order.tracked()) AS total FROM t;
+
+--echo # Read the recorded lifecycle. "postrun" must appear before "drop", and
+--echo # rows_seen=3 proves the postrun hook saw the live, accumulated state.
+SELECT vsql_postrun_order.lifecycle_events() AS lifecycle;
+
+DROP TABLE t;
+
+UNINSTALL EXTENSION vsql_postrun_order;

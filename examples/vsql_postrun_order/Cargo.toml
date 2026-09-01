@@ -1,0 +1,13 @@
+[package]
+name = "vsql_postrun_order"
+version = "0.1.0"
+edition = "2021"
+description = "Example VillageSQL extension: proves the author-supplied postrun hook runs before the automatic drop"
+license = "GPL-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+villagesql = { path = "../../villagesql" }
