@@ -108,8 +108,11 @@ use crate::preview::RequiredCapability;
 /// building it directly, as it must hold a null-terminated static C string.
 #[derive(Copy, Clone, Debug)]
 pub enum Type {
+    /// SQL string, delivered as [`InValue::String`].
     String,
+    /// SQL floating-point number, delivered as [`InValue::Real`].
     Real,
+    /// SQL integer, delivered as [`InValue::Int`].
     Int,
     /// A custom type registered by this extension. The pointer must be a
     /// null-terminated UTF-8 string with `'static` lifetime. Use [`custom!`].
@@ -164,16 +167,22 @@ impl Type {
 /// persisted bytes and parameters are exposed as [`InValue::CustomWithParams`].
 #[derive(Debug)]
 pub enum InValue<'a> {
+    /// SQL NULL. Check for this before reading any other variant.
     Null,
+    /// A string argument, borrowed from the server's buffer for this row.
     String(&'a str),
+    /// A floating-point argument.
     Real(f64),
+    /// An integer argument.
     Int(i64),
     /// A custom-type argument: just its raw persisted bytes.
     Custom(&'a [u8]),
     /// A custom-type argument: its raw persisted bytes plus the type parameters
     /// the column was declared with.
     CustomWithParams {
+        /// The value in its persisted binary form, exactly as stored.
         bytes: &'a [u8],
+        /// The parameters the column was declared with, such as `dimension=768`.
         params: TypeParams<'a>,
     },
 }
@@ -474,28 +483,50 @@ pub enum VdfReturn {
 }
 
 impl VdfReturn {
+    /// Return SQL NULL for this row.
     #[must_use]
     pub fn null() -> Self {
         Self::Null
     }
+
+    /// Return a string. It must fit the result buffer, whose size comes from the
+    /// `buffer_size:` key of [`func!`]; a longer value fails the statement rather
+    /// than being truncated.
     pub fn string(s: impl Into<std::string::String>) -> Self {
         Self::String(s.into())
     }
+
+    /// Return a floating-point value.
     #[must_use]
     pub fn real(v: f64) -> Self {
         Self::Real(v)
     }
+
+    /// Return an integer value.
     #[must_use]
     pub fn int(v: i64) -> Self {
         Self::Int(v)
     }
+
+    /// Return raw bytes for a custom type, in that type's persisted form. This is
+    /// what an `encode` function produces.
     #[must_use]
     pub fn binary(v: Vec<u8>) -> Self {
         Self::Binary(v)
     }
+
+    /// Reject this row without stopping the query. The row's value becomes NULL, the
+    /// message is attached as a warning, and the remaining rows still run.
+    ///
+    /// This is the right answer for bad input in one row.
     pub fn warning(msg: impl Into<std::string::String>) -> Self {
         Self::Warning(msg.into())
     }
+
+    /// Abort the whole statement with this message. No further rows are processed.
+    ///
+    /// Reserve it for conditions where continuing would be wrong, such as data that
+    /// cannot be decoded. For ordinary bad input prefer [`VdfReturn::warning`].
     pub fn error(msg: impl Into<std::string::String>) -> Self {
         Self::Error(msg.into())
     }
@@ -506,23 +537,43 @@ impl VdfReturn {
 /// Compile-time descriptor for a single VDF. Built by [`func!`]; do not
 /// construct this directly.
 pub struct FuncDescriptor {
+    /// The name SQL calls this function by, NUL-terminated.
     pub sql_name: *const c_char,
+    /// The declared parameter types, in order. Empty for a varargs function.
     pub params: &'static [Type],
+    /// The declared return type.
     pub returns: Type,
+    /// Generated `extern "C"` shim the server calls once per row. It unpacks the
+    /// raw arguments, calls the Rust function, and writes the result back.
     pub trampoline: unsafe extern "C" fn(
         *mut villagesql_sys::vef_context_t,
         *mut vef_vdf_args_t,
         *mut vef_vdf_result_t,
     ),
+    /// Bytes to reserve for a string or binary result. `0` asks for the server
+    /// default.
     pub buffer_size: usize,
+    /// Whether the same arguments always give the same answer. Only a deterministic
+    /// function may be used in a generated column or a `CHECK` constraint.
     pub deterministic: bool,
+    /// Whether the function takes any number of arguments. The server then checks
+    /// neither the count nor the types, leaving that to `prerun`.
     pub varargs: bool,
+    /// Called once before the first row, to allocate per-statement state or to
+    /// reject the call. `None` when the function needs neither.
     pub prerun: villagesql_sys::vef_prerun_func_t,
+    /// Called once after the last row, to drop whatever `prerun` allocated. Set
+    /// together with `prerun`.
     pub postrun: villagesql_sys::vef_postrun_func_t,
+    /// Aggregates only: resets the accumulator at the start of each group.
     pub clear: villagesql_sys::vef_vdf_clear_func_t,
+    /// Aggregates only: folds one row into the accumulator.
     pub accumulate: villagesql_sys::vef_vdf_accumulate_func_t,
 }
 
+// SAFETY: every pointer field is either a `'static` NUL-terminated literal produced
+// by `concat!` inside the declaring macro, or a function pointer. Nothing here is
+// heap-allocated or interior-mutable, so sharing a descriptor across threads is sound.
 unsafe impl Send for FuncDescriptor {}
 unsafe impl Sync for FuncDescriptor {}
 
@@ -531,6 +582,7 @@ unsafe impl Sync for FuncDescriptor {}
 /// Compile-time descriptor for a custom SQL type. Built by [`custom_type!`];
 /// do not construct this directly.
 pub struct TypeDescriptor {
+    /// The name SQL uses for this type, NUL-terminated.
     pub sql_name: *const c_char,
     /// Fixed binary size in bytes for persisted storage.
     pub persisted_length: i64,
@@ -556,6 +608,8 @@ pub struct TypeDescriptor {
     pub intrinsic_default_vdf_name: *const c_char,
 }
 
+// SAFETY: as for `FuncDescriptor` — every pointer is a `'static` NUL-terminated
+// literal produced by `concat!` inside the declaring macro.
 unsafe impl Send for TypeDescriptor {}
 unsafe impl Sync for TypeDescriptor {}
 
@@ -563,14 +617,27 @@ unsafe impl Sync for TypeDescriptor {}
 /// (`TYPE::from_string`, `TYPE::to_string`, `TYPE::compare`, `TYPE::hash`).
 /// Built by [`custom_type!`]; do not construct this directly.
 pub struct TypeWithFuncs {
+    /// The type itself: its name, sizes, and the names of its VDFs.
     pub descriptor: TypeDescriptor,
+    /// The SQL functions generated for the type, one per callback supplied.
     pub embedded_funcs: Vec<FuncDescriptor>,
 }
 
+// SAFETY: `descriptor` holds only `'static` literals (see above) and the `Vec` holds
+// `FuncDescriptor`s, which are themselves `Send + Sync` for the same reason.
 unsafe impl Send for TypeWithFuncs {}
 unsafe impl Sync for TypeWithFuncs {}
 
 // Prerun / Postrun
+
+/// The arguments a statement was called with, as seen by a prerun function.
+///
+/// Prerun runs once, before the first row, and sees only the shape of the call: how
+/// many arguments there are and what type each one is. The values themselves are not
+/// available yet.
+///
+/// This is where a varargs function validates its call, since the server checks
+/// nothing for one. See [`varargs_func!`].
 #[derive(Clone, Copy)]
 pub struct PrerunArgs<'a> {
     inner: &'a villagesql_sys::vef_prerun_args_t,
@@ -611,18 +678,26 @@ pub struct ArgType<'a> {
 }
 
 impl ArgType<'_> {
+    /// True if this argument is a string.
     #[must_use]
     pub fn is_str(&self) -> bool {
         self.inner.id == villagesql_sys::vef_type_id_VEF_TYPE_STRING
     }
+
+    /// True if this argument is a floating-point number.
     #[must_use]
     pub fn is_real(&self) -> bool {
         self.inner.id == villagesql_sys::vef_type_id_VEF_TYPE_REAL
     }
+
+    /// True if this argument is an integer.
     #[must_use]
     pub fn is_int(&self) -> bool {
         self.inner.id == villagesql_sys::vef_type_id_VEF_TYPE_INT
     }
+
+    /// True if this argument is a custom type. Use [`ArgType::custom_name`] to find
+    /// out which one.
     #[must_use]
     pub fn is_custom(&self) -> bool {
         self.inner.id == villagesql_sys::vef_type_id_VEF_TYPE_CUSTOM
