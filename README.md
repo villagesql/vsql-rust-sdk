@@ -43,16 +43,14 @@ cargo generate --git https://github.com/villagesql/vsql-extension-template-rust
 ```sh
 cargo new --lib my-extension
 cd my-extension
+cargo add villagesql
 ```
 
-Add to `Cargo.toml`:
+Then add to `Cargo.toml`, so Cargo builds a shared library the server can load:
 
 ```toml
 [lib]
 crate-type = ["cdylib"]
-
-[dependencies]
-villagesql = "0.0.1"
 ```
 
 </details>

@@ -1,13 +1,83 @@
 //! Safe Rust SDK for writing `VillageSQL` extension functions (VDFs) and custom types.
 //!
-//! # Quick start (functions)
+//! A `VillageSQL` extension is a shared library the server loads at run time. It can add
+//! SQL functions, and it can add whole SQL types with their own storage format and
+//! ordering. This crate wraps the C extension ABI so that you write ordinary Rust —
+//! `&str`, `i64`, `Vec<u8>` — and never touch a raw pointer.
 //!
-//! 1. Add `villagesql = "0.0.1"` to your `Cargo.toml` with `crate-type = ["cdylib"]`.
-//! 2. Write a function with the signature `fn(&[InValue]) -> VdfReturn`.
-//! 3. Declare the extension with the [`extension!`] macro.
+//! # Quick start
 //!
-//! See `examples/vsql_rot13` for a complete working function extension.
-//! See `examples/vsql_rational` for a complete working custom type extension.
+//! 1. Create a library crate and add the dependency:
+//!
+//!    ```bash
+//!    cargo new --lib my_extension
+//!    cd my_extension
+//!    cargo add villagesql
+//!    ```
+//!
+//! 2. Tell Cargo to build a shared library, which is the form the server can load:
+//!
+//!    ```toml
+//!    [lib]
+//!    crate-type = ["cdylib"]
+//!    ```
+//!
+//! 3. Write a function, then declare it with the [`extension!`] macro.
+//! 4. Package and install it with the `cargo-vsql` companion CLI:
+//!    `cargo vsql install`.
+//!
+//! To skip steps 1 and 2, generate a ready-made crate from the template instead:
+//!
+//! ```bash
+//! cargo generate --git https://github.com/villagesql/vsql-extension-template-rust
+//! ```
+//!
+//! # The three function shapes
+//!
+//! Which signature you write depends on what the function needs to remember.
+//!
+//! | Shape | Signature | Declared with |
+//! |---|---|---|
+//! | Plain — each row stands alone | `fn(&[InValue]) -> VdfReturn` | [`func!`] |
+//! | Carries state across the rows of one statement | `fn(&mut T, &[InValue]) -> VdfReturn` | [`func!`] with `state:` and `prerun:` |
+//! | Aggregate — one value per group | `fn(&State) -> VdfReturn` | [`agg_func!`] |
+//!
+//! In every shape, check for [`InValue::Null`] before reading an argument, and return
+//! [`VdfReturn::warning`] for bad input (the row becomes NULL and the query continues)
+//! or [`VdfReturn::error`] to abort the whole statement.
+//!
+//! # What this SDK covers
+//!
+//! Every row below has a complete, compiling example crate in the repository's
+//! `examples/` directory.
+//!
+//! | Feature | Start with | Example |
+//! |---|---|---|
+//! | A plain SQL function | [`func!`] | `vsql_rot13` |
+//! | Per-statement state, via prerun and postrun | [`func!`], [`PrerunResult`] | `vsql_call_index` |
+//! | An aggregate function | [`agg_func!`] | `vsql_agg_sum` |
+//! | A function taking any number of arguments | [`varargs_func!`] | `vsql_varargs` |
+//! | A custom SQL type, fixed size | [`custom_type!`] | `vsql_rational` |
+//! | A custom SQL type sized by its parameters | [`parameterized_type!`] | see `tests/sdk_coverage` |
+//!
+//! # Preview capabilities
+//!
+//! [`preview`] holds wrappers over server internals — server variables, status
+//! variables, background threads, the keyring, and running SQL from inside an
+//! extension. Each one is opt-in: name it in the `requires:` list of [`extension!`],
+//! and the server hands back a function table at registration time.
+//!
+//! These are gated on both sides. The server refuses to install any extension that
+//! declares a capability unless it was started with
+//! `vsql_allow_preview_extensions=ON`. A wrapper that calls into the server reports a
+//! missing or too-old capability: the keyring returns
+//! [`KeyringError::CapabilityUnavailable`](preview::keyring::KeyringError::CapabilityUnavailable),
+//! and the rest return `None`. Status variables and background threads register once
+//! and make no such call. The interfaces may change between releases, which is what
+//! "preview" means here.
+//!
+//! See the [`preview`] module for the list, and `examples/vsql_ping` for the smallest
+//! working case.
 
 pub use paste;
 pub use villagesql_sys as sys;
