@@ -128,6 +128,8 @@ jobs:
             dir: examples/vsql_keyring
           - name: vsql_ping
             dir: examples/vsql_ping
+          - name: vsql_postrun_order
+            dir: examples/vsql_postrun_order
           - name: vsql_rational
             dir: examples/vsql_rational
           - name: vsql_rot13

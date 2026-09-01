@@ -566,6 +566,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vsql_postrun_order"
+version = "0.1.0"
+dependencies = [
+ "villagesql",
+]
+
+[[package]]
 name = "vsql_rational"
 version = "0.0.1"
 dependencies = [
