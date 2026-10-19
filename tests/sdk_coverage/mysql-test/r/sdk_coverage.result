@@ -135,7 +135,7 @@ padint::from_string('42')
 # parameterized columns with DIFFERENT widths: the typed params cache
 # parses/stores width=5 and width=3 separately; decode pads to each
 CREATE TABLE t3 (
-id INT, 
+id INT,
 p5 sdk_coverage.padint(5),
 p3 sdk_coverage.padint(3)
 );
