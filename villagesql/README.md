@@ -207,7 +207,7 @@ Required fields: `type_name`, `persisted_length`, `max_decode_buffer_length`, `e
 
 Optional fields: `hash` (recommended whenever the type will be used in indexes or hash joins), `default`.
 
-An `Err` from `encode` rejects the input as a bad value for the type. Storing it into a column gets the standard bad-value handling (a warning, which strict mode promotes to an error); calling `TYPE::from_string` directly returns NULL with a warning.
+An `Err` from `encode` rejects the input as a bad value for the type. Storing it into a column gets the standard bad-value handling (a warning, which strict mode promotes to an error); calling `TYPE::from_string` directly returns NULL with a warning. The exception is a `parameterized_type!` called on a string literal, e.g. `TYPE::from_string('...')`: the server infers the parameters by encoding the literal while resolving the query, so a bad literal is an error.
 
 The four generated VDFs are also exported as callable SQL functions:
 
