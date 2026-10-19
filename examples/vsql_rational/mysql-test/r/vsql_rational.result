@@ -99,7 +99,10 @@ SELECT rational::from_string(NULL);
 rational::from_string(NULL)
 NULL
 SELECT rational::from_string('not-a-rational');
-ERROR HY000: VDF error in function 'rational::from_string': rational: expected 'n/d', got "not-a-rational"
+rational::from_string('not-a-rational')
+NULL
+Warnings:
+Warning	3200	VDF error in function 'rational::from_string': rational: expected 'n/d', got "not-a-rational"
 # Type-level VDFs: to_string
 SELECT rational::to_string(rational::from_string('7/14'));
 rational::to_string(rational::from_string('7/14'))

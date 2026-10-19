@@ -20,7 +20,7 @@ SELECT sdk_warn_if_negative(NULL);
 SELECT counter::from_string('42');
 SELECT counter::from_string('-7');
 SELECT counter::from_string(NULL);
---error ER_UDF_ERROR
+--echo # A bad value from encode is NULL with a warning, not an error
 SELECT counter::from_string('not-a-number');
 SELECT counter::compare(counter::from_string('1'), counter::from_string('2'));
 SELECT counter::compare(counter::from_string('5'), counter::from_string('5'));
@@ -30,7 +30,6 @@ SELECT counter::compare(counter::from_string('9'), counter::from_string('3'));
 SELECT flag::from_string('true');
 SELECT flag::from_string('false');
 SELECT flag::from_string(NULL);
---error ER_UDF_ERROR
 SELECT flag::from_string('maybe');
 SELECT flag::compare(flag::from_string('false'), flag::from_string('true'));
 SELECT flag::compare(flag::from_string('true'), flag::from_string('true'));
@@ -39,6 +38,11 @@ SELECT flag::compare(flag::from_string('true'), flag::from_string('false'));
 --echo # Two types in one extension: ORDER BY counter then flag
 CREATE TABLE t1 (id INT, c counter, f flag);
 INSERT INTO t1 VALUES (1, '10', 'true'), (2, '3', 'false'), (3, '10', 'false');
+--echo # A bad value stored into a column gets the standard bad-value error
+--error ER_TRUNCATED_WRONG_VALUE_FOR_FIELD
+INSERT INTO t1 VALUES (4, 'not-a-number', 'true');
+--error ER_TRUNCATED_WRONG_VALUE_FOR_FIELD
+INSERT INTO t1 VALUES (4, '1', 'maybe');
 SELECT id, c, f FROM t1 ORDER BY id;
 SELECT id, c, f FROM t1 ORDER BY c, f;
 DROP TABLE t1;
@@ -68,7 +72,7 @@ SELECT padint::from_string('42');
 --echo # parameterized columns with DIFFERENT widths: the typed params cache
 --echo # parses/stores width=5 and width=3 separately; decode pads to each
 CREATE TABLE t3 (
-    id INT, 
+    id INT,
     p5 sdk_coverage.padint(5),
     p3 sdk_coverage.padint(3)
 );

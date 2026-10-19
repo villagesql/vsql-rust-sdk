@@ -993,10 +993,12 @@ pub unsafe fn dispatch_from_string_typed<P>(
     };
 
     // Run the author's encoder. When params were unknown, this is where it
-    // inspects the string and fills them in via `set`.
+    // inspects the string and fills them in via `set`. An `Err` is a bad value,
+    // not a failure: a warning gets the server's standard bad-value handling,
+    // which strict mode promotes to an error.
     let ret = match encode(s, &mut maybe) {
         Ok(bytes) => VdfReturn::Binary(bytes),
-        Err(e) => VdfReturn::error(e),
+        Err(e) => VdfReturn::warning(e),
     };
     write_result(ret, result);
 
@@ -2069,9 +2071,10 @@ macro_rules! __vsql_type_vdfs {
                 args: &[$crate::InValue],
             ) -> $crate::VdfReturn {
                 match args.get(0) {
+                    // An `Err` is a bad value; see dispatch_from_string_typed.
                     Some($crate::InValue::String(s)) => match $enc_fn(s) {
                         Ok(bytes) => $crate::VdfReturn::Binary(bytes),
-                        Err(e) => $crate::VdfReturn::error(e),
+                        Err(e) => $crate::VdfReturn::warning(e),
                     },
                     Some($crate::InValue::Null) | None => $crate::VdfReturn::null(),
                     _ => $crate::VdfReturn::error(
@@ -2581,7 +2584,7 @@ macro_rules! __vsql_type_vdfs_typed {
 /// | `type_name:` | The name SQL uses, as a string literal |
 /// | `persisted_length:` | Exact bytes every stored value occupies |
 /// | `max_decode_buffer_length:` | Longest text form `decode` can produce, in bytes |
-/// | `encode:` | `fn(&str) -> Result<Vec<u8>, String>` — text to stored bytes |
+/// | `encode:` | `fn(&str) -> Result<Vec<u8>, String>` — text to stored bytes; `Err` rejects a bad value (a warning, or an error in strict mode) |
 /// | `decode:` | `fn(&[u8]) -> Result<String, String>` — stored bytes back to text |
 /// | `compare:` | `fn(&[u8], &[u8]) -> std::cmp::Ordering` — the type's ordering |
 ///
@@ -2747,7 +2750,7 @@ macro_rules! custom_type {
 /// | `type_name:` | The name SQL uses, as a string literal |
 /// | `max_persisted_length:` | The largest a value can be, over every legal parameter set |
 /// | `max_decode_buffer_length:` | The longest text form, over every legal parameter set, in bytes |
-/// | `encode:` | `fn(&str, &mut MaybeParams<P>) -> Result<Vec<u8>, String>` |
+/// | `encode:` | `fn(&str, &mut MaybeParams<P>) -> Result<Vec<u8>, String>`; `Err` rejects a bad value (a warning, or an error in strict mode) |
 /// | `decode:` | `fn(&[u8], &P) -> Result<String, String>` |
 /// | `compare:` | `fn(&[u8], &[u8], &P) -> std::cmp::Ordering` |
 /// | `int_to_params:` | `fn(i64) -> Result<String, String>` — the `TVECTOR(768)` shorthand |

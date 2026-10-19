@@ -58,7 +58,6 @@ SELECT rational::from_string('3/6');
 SELECT rational::from_string('-4/8');
 SELECT rational::from_string('0/5');
 SELECT rational::from_string(NULL);
---error ER_UDF_ERROR
 SELECT rational::from_string('not-a-rational');
 
 --echo # Type-level VDFs: to_string

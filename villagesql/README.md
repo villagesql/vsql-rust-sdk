@@ -207,6 +207,8 @@ Required fields: `type_name`, `persisted_length`, `max_decode_buffer_length`, `e
 
 Optional fields: `hash` (recommended whenever the type will be used in indexes or hash joins), `default`.
 
+An `Err` from `encode` rejects the input as a bad value for the type. Storing it into a column gets the standard bad-value handling (a warning, which strict mode promotes to an error); calling `TYPE::from_string` directly returns NULL with a warning.
+
 The four generated VDFs are also exported as callable SQL functions:
 
 | Generated VDF | Signature |

@@ -44,8 +44,12 @@ counter::from_string('-7')
 SELECT counter::from_string(NULL);
 counter::from_string(NULL)
 NULL
+# A bad value from encode is NULL with a warning, not an error
 SELECT counter::from_string('not-a-number');
-ERROR HY000: VDF error in function 'counter::from_string': counter: invalid digit found in string
+counter::from_string('not-a-number')
+NULL
+Warnings:
+Warning	3200	VDF error in function 'counter::from_string': counter: invalid digit found in string
 SELECT counter::compare(counter::from_string('1'), counter::from_string('2'));
 counter::compare(counter::from_string('1'), counter::from_string('2'))
 -1
@@ -66,7 +70,10 @@ SELECT flag::from_string(NULL);
 flag::from_string(NULL)
 NULL
 SELECT flag::from_string('maybe');
-ERROR HY000: VDF error in function 'flag::from_string': flag: expected 'true' or 'false', got "maybe"
+flag::from_string('maybe')
+NULL
+Warnings:
+Warning	3200	VDF error in function 'flag::from_string': flag: expected 'true' or 'false', got "maybe"
 SELECT flag::compare(flag::from_string('false'), flag::from_string('true'));
 flag::compare(flag::from_string('false'), flag::from_string('true'))
 -1
@@ -79,6 +86,11 @@ flag::compare(flag::from_string('true'), flag::from_string('false'))
 # Two types in one extension: ORDER BY counter then flag
 CREATE TABLE t1 (id INT, c counter, f flag);
 INSERT INTO t1 VALUES (1, '10', 'true'), (2, '3', 'false'), (3, '10', 'false');
+# A bad value stored into a column gets the standard bad-value error
+INSERT INTO t1 VALUES (4, 'not-a-number', 'true');
+ERROR HY000: Incorrect counter value: 'not-a-number' for column 'c' at row 1
+INSERT INTO t1 VALUES (4, '1', 'maybe');
+ERROR HY000: Incorrect flag value: 'maybe' for column 'f' at row 1
 SELECT id, c, f FROM t1 ORDER BY id;
 id	c	f
 1	10	true
