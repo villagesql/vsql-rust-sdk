@@ -31,7 +31,7 @@ use std::ffi::{c_char, c_void, CStr};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 // ABI version tag the server matches against
-const VTABLE_HASH: &[u8] = b"ver-1\0";
+const VTABLE_HASH: &[u8] = b"ver-2\0";
 
 /// `capability_config` version tag the server matches against.
 const CONFIG_HASH: &[u8] = b"ver-1\0";
@@ -152,8 +152,9 @@ impl SysVarCapability {
         Some(unsafe { get_fn(component_name, name, val, val_len) })
     }
 
-    /// Set a system variable owned by `component_name` to `val`, via the
-    /// `vsql::sys_var` capability.
+    /// Set a STRING, BOOL or DOUBLE system variable owned by `component_name`
+    /// to `val`, via the `vsql::sys_var` capability. An INT variable cannot be
+    /// set from a string; use [`set_int`](Self::set_int).
     ///
     /// `scope` selects persistence: `null` = running value only, `"PERSIST"` =
     /// running value + persisted, `"PERSIST_ONLY"` = persisted (applies on
@@ -190,6 +191,37 @@ impl SysVarCapability {
         let set_fn = vtable.set?;
         // SAFETY: server-provided function pointer; pointers valid for the call.
         Some(unsafe { set_fn(component_name, name, scope, val) })
+    }
+
+    /// Set an INT system variable owned by `component_name` to `val`, via the
+    /// `vsql::sys_var` capability. An INT variable cannot be set from a string,
+    /// so use this for INT and [`set`](Self::set) for every other type.
+    ///
+    /// # Safety
+    /// `component_name` and `name` must be valid, NUL-terminated C strings.
+    /// `scope` must be null or a valid NUL-terminated C string - all valid for
+    /// the duration of the call.
+    #[must_use]
+    pub unsafe fn set_int(
+        &self,
+        component_name: *const c_char,
+        name: *const c_char,
+        scope: *const c_char,
+        val: i64,
+    ) -> Option<bool> {
+        let vtable = self.abi_.load(Ordering::Acquire);
+        if vtable.is_null() {
+            return None;
+        }
+        // SAFETY: non-null slot written by the server at load time, points to a
+        // 'static vef_preview_sys_var_t the server owns.
+        let vtable = unsafe { &*vtable };
+        if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
+            return None;
+        }
+        let set_int_fn = vtable.set_int?;
+        // SAFETY: server-provided function pointer. Pointers valid for the call.
+        Some(unsafe { set_int_fn(component_name, name, scope, val) })
     }
 }
 

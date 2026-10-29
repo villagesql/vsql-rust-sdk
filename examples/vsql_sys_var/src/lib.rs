@@ -106,17 +106,17 @@ fn read_threshold_impl(_args: &[InValue]) -> VdfReturn {
 
 /// SQL: `vsql_sys_var.set_threshold_500()` -> INT
 ///
-/// Sets `threshold` to 500 through the Rust `set` accessor, exercising the `set()`
-/// FFI path. Returns 1 on success, 0 otherwise.
+/// Sets `threshold` to 500 through the Rust `set_int` accessor, exercising the
+/// `set()` FFI path. Returns 1 on success, 0 otherwise.
 fn set_threshold_500_impl(_args: &[InValue]) -> VdfReturn {
-    // SAFETY: all pointers are validNUL-terminated C strings (scope is null =
+    // SAFETY: all pointers are valid NUL-terminated C strings (scope is null =
     // running value only), live for the call.
     let result = unsafe {
-        SYS_VAR.set(
+        SYS_VAR.set_int(
             c"vsql_sys_var".as_ptr(),
             c"threshold".as_ptr(),
             std::ptr::null(),
-            c"500".as_ptr(),
+            500,
         )
     };
     // set() returns Some(false) on success (inverted C bool).
