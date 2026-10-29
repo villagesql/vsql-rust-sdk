@@ -89,13 +89,14 @@ use std::ffi::c_char;
 use std::marker::PhantomData;
 use std::sync::{OnceLock, RwLock};
 use villagesql_sys::{
-    vef_func_desc_t, vef_postrun_args_t, vef_prerun_args_t, vef_prerun_result_t,
-    vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t, vef_required_capability_t,
-    vef_return_value_type_t_VEF_RESULT_ERROR, vef_return_value_type_t_VEF_RESULT_NULL,
-    vef_return_value_type_t_VEF_RESULT_VALUE, vef_return_value_type_t_VEF_RESULT_WARNING,
-    vef_signature_t, vef_type_desc_t, vef_type_id_VEF_TYPE_CUSTOM, vef_type_id_VEF_TYPE_INT,
-    vef_type_id_VEF_TYPE_REAL, vef_type_id_VEF_TYPE_STRING, vef_type_params_t, vef_type_t,
-    vef_vdf_args_t, vef_vdf_result_t, VEF_MAX_ERROR_LEN,
+    vef_func_desc_t, vef_postrun_args_t, vef_prerun_args_t, vef_prerun_result_t, vef_protocol_t,
+    vef_protocol_t_VEF_PROTOCOL_3, vef_protocol_t_VEF_PROTOCOL_4, vef_registration_t,
+    vef_required_capability_t, vef_return_value_type_t_VEF_RESULT_ERROR,
+    vef_return_value_type_t_VEF_RESULT_NULL, vef_return_value_type_t_VEF_RESULT_VALUE,
+    vef_return_value_type_t_VEF_RESULT_WARNING, vef_signature_t, vef_type_desc_t,
+    vef_type_id_VEF_TYPE_CUSTOM, vef_type_id_VEF_TYPE_INT, vef_type_id_VEF_TYPE_REAL,
+    vef_type_id_VEF_TYPE_STRING, vef_type_params_t, vef_type_t, vef_vdf_args_t, vef_vdf_result_t,
+    VEF_MAX_ERROR_LEN,
 };
 
 use crate::preview::RequiredCapability;
@@ -391,6 +392,20 @@ impl Resolved {
     }
 }
 
+/// A parameterized type's params struct: how to build it from canonical
+/// `key=value` pairs and how to write it back. Lets SDK code, such as a `bind`
+/// hook, reach those conversions by naming the struct alone.
+///
+/// Implement this on the struct you name as `params_type:` in
+/// [`parameterized_type!`]. One implementation per struct, so several types
+/// can share a params struct and always agree on how it converts.
+pub trait TypeParameters: Sized {
+    /// Build the struct from parsed params.
+    fn parse(params: Params<'_>) -> Self;
+    /// Write the struct back as `(key, value)` pairs, the inverse of `parse`.
+    fn to_strings(&self) -> Vec<(String, String)>;
+}
+
 /// A thread-safe, parse-once cache mapping a canonical params string to its
 /// typed form `P`. One concrete cache exists per parameterized type. The
 /// `parameterized_type!` macro creates a `static` holding it.
@@ -569,6 +584,9 @@ pub struct FuncDescriptor {
     pub clear: villagesql_sys::vef_vdf_clear_func_t,
     /// Aggregates only: folds one row into the accumulator.
     pub accumulate: villagesql_sys::vef_vdf_accumulate_func_t,
+    /// Called once when the statement is resolved, to decide type parameters the
+    /// built-in rules cannot. `None` leaves those rules in charge.
+    pub bind: villagesql_sys::vef_bind_types_func_t,
 }
 
 // SAFETY: every pointer field is either a `'static` NUL-terminated literal produced
@@ -751,6 +769,277 @@ impl<T> PrerunResult<'_, T> {
     }
 }
 
+// Bind and check types
+
+/// Whether the server's bind result has `out_arg_types`. Servers before
+/// `VillageSQL` 0.0.8 also declare protocol 4 but lack the field, so it is
+/// gated on the server version reported at registration.
+static SERVER_HAS_OUT_ARG_TYPES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the server calls bind hooks. `VillageSQL` 0.0.6 knows protocol 4
+/// but has no bind hook in its structs; 0.0.7 added it.
+static SERVER_SUPPORTS_BIND: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Record what the server supports. Called by [`extension!`] before
+/// building the registration.
+///
+/// # Safety
+/// `arg` must be null or point to a valid `vef_register_arg_t`.
+#[doc(hidden)]
+pub unsafe fn record_server(arg: *const villagesql_sys::vef_register_arg_t) {
+    let Some(arg) = arg.as_ref() else { return };
+    let v = &arg.vef_version;
+    let version = (v.major, v.minor, v.patch);
+    SERVER_SUPPORTS_BIND.store(version >= (0, 0, 7), std::sync::atomic::Ordering::Relaxed);
+    SERVER_HAS_OUT_ARG_TYPES.store(version >= (0, 0, 8), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The arguments a call was resolved with, as seen by a `bind` hook.
+///
+/// The hook runs once, when the statement is resolved, before prerun and
+/// before any row is read. Like prerun it sees each argument's type, plus two
+/// things prerun does not: each argument's resolved type parameters, and the
+/// text of any constant string argument (e.g. the `'user'` in `TYPEID('user')`).
+#[derive(Copy, Clone)]
+pub struct BindArgs<'a> {
+    inner: &'a villagesql_sys::vef_bind_types_args_t,
+}
+
+impl<'a> BindArgs<'a> {
+    pub(crate) unsafe fn from_raw(raw: *const villagesql_sys::vef_bind_types_args_t) -> Self {
+        Self { inner: &*raw }
+    }
+
+    /// Number of arguments in the call.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.arg_count as usize
+    }
+
+    /// True if the function was called with no arguments.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Argument `i`, or `None` if `i` is out of range.
+    #[must_use]
+    pub fn at(&self, i: usize) -> Option<BindArg<'a>> {
+        // Stands in for an argument with no params array or entry.
+        const NO_PARAMS: villagesql_sys::vef_type_params_t = villagesql_sys::vef_type_params_t {
+            count: 0,
+            keys: std::ptr::null(),
+            values: std::ptr::null(),
+        };
+        if i >= self.len() {
+            return None;
+        }
+        // SAFETY: the server guarantees arg_types holds arg_count non-null
+        // entries. arg_params and the const arrays (and their entries) may be
+        // null, and are checked before use.
+        unsafe {
+            let ty = &**self.inner.arg_types.add(i);
+            let params = if self.inner.arg_params.is_null() {
+                &NO_PARAMS
+            } else {
+                self.inner
+                    .arg_params
+                    .add(i)
+                    .read()
+                    .as_ref()
+                    .unwrap_or(&NO_PARAMS)
+            };
+            let constant =
+                if self.inner.const_values.is_null() || self.inner.const_lengths.is_null() {
+                    None
+                } else {
+                    let p = *self.inner.const_values.add(i);
+                    (!p.is_null()).then(|| {
+                        std::slice::from_raw_parts(p.cast::<u8>(), *self.inner.const_lengths.add(i))
+                    })
+                };
+            Some(BindArg {
+                ty: ArgType { inner: ty },
+                params: TypeParams { raw: params },
+                constant,
+            })
+        }
+    }
+}
+
+/// One argument as a `bind` hook sees it.
+pub struct BindArg<'a> {
+    ty: ArgType<'a>,
+    params: TypeParams<'a>,
+    constant: Option<&'a [u8]>,
+}
+
+impl<'a> BindArg<'a> {
+    /// The argument's type.
+    #[must_use]
+    pub fn ty(&self) -> &ArgType<'a> {
+        &self.ty
+    }
+
+    /// True when this argument arrived with its type parameters resolved.
+    #[must_use]
+    pub fn has_params(&self) -> bool {
+        !self.params.is_empty()
+    }
+
+    /// This argument's parameters as your params struct, or `None` when they
+    /// are not known: not a custom type, not parameterized, or not resolved yet.
+    #[must_use]
+    pub fn params<P: TypeParameters>(&self) -> Option<P> {
+        if !self.has_params() {
+            return None;
+        }
+        let key = canonical_key(self.params);
+        Some(P::parse(Params::parse(&key)))
+    }
+
+    /// The raw bytes of a constant string argument, or `None` if this argument
+    /// is not a string constant.
+    #[must_use]
+    pub fn const_bytes(&self) -> Option<&'a [u8]> {
+        self.constant
+    }
+
+    /// The text of a constant string argument, or `None` if it is not a string
+    /// constant or is not valid UTF-8.
+    #[must_use]
+    pub fn const_str(&self) -> Option<&'a str> {
+        self.constant.and_then(|b| std::str::from_utf8(b).ok())
+    }
+}
+
+/// Where a `bind` hook writes its answer: the return type's parameters, and
+/// optionally parameters or a type for individual arguments. Calling nothing
+/// means "no parameters to decide".
+pub struct BindResult<'a> {
+    inner: &'a mut villagesql_sys::vef_bind_types_result_t,
+    arg_count: usize,
+}
+
+impl BindResult<'_> {
+    pub(crate) unsafe fn from_raw(
+        raw: *mut villagesql_sys::vef_bind_types_result_t,
+        arg_count: usize,
+    ) -> Self {
+        Self {
+            inner: &mut *raw,
+            arg_count,
+        }
+    }
+
+    /// The parameters the function's return type should have, serialized
+    /// through `P`'s [`TypeParameters::to_strings`].
+    pub fn set_return<P: TypeParameters>(&mut self, p: &P) {
+        if self.inner.out_return_params.is_null() {
+            return;
+        }
+        let bytes = params_bytes(p);
+        // SAFETY: non-null, server-owned slot valid for the call.
+        unsafe { write_slot(&mut *self.inner.out_return_params, bytes.as_bytes()) };
+    }
+
+    /// Decide argument `i`'s parameters, for an argument the server could not
+    /// resolve on its own (typically a bare string literal bound for a
+    /// parameterized type). Arguments you say nothing about keep whatever the
+    /// server worked out.
+    pub fn set_arg<P: TypeParameters>(&mut self, i: usize, p: &P) {
+        let Some(slot) = self.arg_slot(self.inner.out_arg_params, i, "set_arg") else {
+            return;
+        };
+        // SAFETY: arg_slot returned a valid, server-owned slot.
+        unsafe { write_slot(slot, params_bytes(p).as_bytes()) };
+    }
+
+    /// Varargs only: read argument `i` as the custom type `type_name`, which must
+    /// be a type registered by this extension. Effective only for an argument
+    /// the server could not type at all (in practice a string constant). For an
+    /// argument that already has a type, the name is checked, and a mismatch
+    /// aborts the statement. Does nothing for a fixed-arity function, whose
+    /// signature already says what each argument is. Requires `VillageSQL` 0.0.8
+    /// or newer. On older servers it fails the statement.
+    pub fn set_arg_type(&mut self, i: usize, type_name: &str) {
+        if !SERVER_HAS_OUT_ARG_TYPES.load(std::sync::atomic::Ordering::Relaxed) {
+            self.fail("set_arg_type needs VillageSQL 0.0.8 or newer");
+            return;
+        }
+        let Some(slot) = self.arg_slot(self.inner.out_arg_types, i, "set_arg_type") else {
+            return;
+        };
+        // SAFETY: arg_slot returned a valid, server-owned slot.
+        unsafe { write_slot(slot, type_name.as_bytes()) };
+    }
+
+    /// Both halves of typing a constant argument in one call: the type to read
+    /// it as, and the parameters to read it with. Prefer this over calling
+    /// [`set_arg_type`](Self::set_arg_type) and [`set_arg`](Self::set_arg)
+    /// separately.
+    pub fn set_arg_with_type<P: TypeParameters>(&mut self, i: usize, type_name: &str, p: &P) {
+        self.set_arg_type(i, type_name);
+        self.set_arg(i, p);
+    }
+
+    /// Reject the call. The statement is aborted with this message.
+    pub fn error(mut self, msg: &str) {
+        self.fail(msg);
+    }
+
+    fn fail(&mut self, msg: &str) {
+        self.inner.type_ = vef_return_value_type_t_VEF_RESULT_ERROR;
+        // SAFETY: the server supplies a VEF_MAX_ERROR_LEN buffer.
+        unsafe { write_error_msg(msg.as_bytes(), self.inner.error_msg) };
+    }
+
+    /// Slot `i` of a per-argument output array, or `None` when the server did
+    /// not supply the array. An out-of-range `i` is an author bug: it fails the
+    /// statement with a message naming the call, rather than writing out of bounds.
+    fn arg_slot(
+        &mut self,
+        slots: *mut *mut villagesql_sys::vef_inferred_type_params_t,
+        i: usize,
+        method: &str,
+    ) -> Option<&mut villagesql_sys::vef_inferred_type_params_t> {
+        if slots.is_null() {
+            return None;
+        }
+        if i >= self.arg_count {
+            self.fail(&format!(
+                "{method}({i}): argument index out of range ({} arguments)",
+                self.arg_count
+            ));
+            return None;
+        }
+        // SAFETY: when non-null, the server supplies arg_count non-null entries.
+        Some(unsafe { &mut **slots.add(i) })
+    }
+}
+
+/// `P` serialized to the canonical `key=value,...` form the server expects.
+fn params_bytes<P: TypeParameters>(p: &P) -> String {
+    let pairs = p.to_strings();
+    canonical_params_string(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+}
+
+/// Copy `bytes` into a server-supplied slot, following the snprintf-style
+/// overflow contract: `actual_len` is always the full length, and the bytes
+/// are written only when they fit.
+///
+/// # Safety
+/// `slot.buf` must point to at least `slot.max_buf_len` writable bytes.
+unsafe fn write_slot(slot: &mut villagesql_sys::vef_inferred_type_params_t, bytes: &[u8]) {
+    slot.actual_len = bytes.len();
+    slot.overflow = bytes.len() > slot.max_buf_len;
+    if !slot.overflow && !bytes.is_empty() {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), slot.buf.cast::<u8>(), bytes.len());
+    }
+}
+
 // ── Internal runtime helpers ──────────────────────────────────────────────────
 
 /// Borrow the state stashed by `set_state`, without taking ownership.
@@ -843,6 +1132,20 @@ pub unsafe fn dispatch_prerun<T>(
         PrerunArgs::from_raw(args),
         PrerunResult::<T>::from_raw(result),
     );
+}
+
+/// Bind runner: wrap the raw slots and call the author's `bind` hook.
+///
+/// # Safety
+/// `args` and `result` must be valid for the duration of the call.
+pub unsafe fn dispatch_bind(
+    f: fn(BindArgs, BindResult),
+    args: *mut villagesql_sys::vef_bind_types_args_t,
+    result: *mut villagesql_sys::vef_bind_types_result_t,
+) {
+    let args = BindArgs::from_raw(args);
+    let out = BindResult::from_raw(result, args.len());
+    f(args, out);
 }
 
 /// Row runner for functions that own per-statement state. Borrows the state
@@ -1159,7 +1462,7 @@ unsafe fn cstr_to_str<'a>(p: *const c_char) -> &'a str {
     std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(p).to_bytes())
 }
 
-unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
+unsafe fn build_func_ptr(d: &FuncDescriptor, protocol: vef_protocol_t) -> *mut vef_func_desc_t {
     let (param_count, params_ptr) = if d.varargs {
         (villagesql_sys::VEF_PARAM_VARARGS, std::ptr::null())
     } else {
@@ -1173,7 +1476,9 @@ unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
         return_type: d.returns.to_raw(),
     }));
     Box::into_raw(Box::new(vef_func_desc_t {
-        protocol: vef_protocol_t_VEF_PROTOCOL_3,
+        // The registration's protocol: the server rejects a function descriptor
+        // declaring less than its registration.
+        protocol,
         name: d.sql_name,
         signature: sig,
         vdf: Some(d.trampoline),
@@ -1184,7 +1489,7 @@ unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
         clear: d.clear,
         accumulate: d.accumulate,
         max_result_length: 0,
-        bind_and_check_types: None,
+        bind_and_check_types: d.bind,
     }))
 }
 
@@ -1201,16 +1506,35 @@ pub unsafe fn build_registration(
     types: &[TypeWithFuncs],
     caps: &[RequiredCapability],
 ) -> *mut vef_registration_t {
+    // ── Protocol ───────────────────────────────────────────────────────────────
+    // Protocol 4 is unstable: the server accepts it only while it is the
+    // server's current protocol. So declare it only when a function needs it
+    // (a bind hook), and keep every other extension on stable protocol 3.
+    let all_funcs = || {
+        funcs
+            .iter()
+            .chain(types.iter().flat_map(|t| &t.embedded_funcs))
+    };
+    let uses_bind = all_funcs().any(|d| d.bind.is_some());
+    let protocol = if uses_bind {
+        vef_protocol_t_VEF_PROTOCOL_4
+    } else {
+        vef_protocol_t_VEF_PROTOCOL_3
+    };
+    // An older server would misread the protocol 4 structs, so refuse to
+    // install there instead.
+    let error_msg = if uses_bind && !SERVER_SUPPORTS_BIND.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        c"bind hooks need VillageSQL 0.0.7 or newer"
+            .as_ptr()
+            .cast_mut()
+    } else {
+        std::ptr::null_mut()
+    };
+
     // ── Functions: explicit + embedded from each type ─────────────────────────
-    let mut func_ptrs: Vec<*mut vef_func_desc_t> = Vec::new();
-    for d in funcs {
-        func_ptrs.push(build_func_ptr(d));
-    }
-    for t in types {
-        for d in &t.embedded_funcs {
-            func_ptrs.push(build_func_ptr(d));
-        }
-    }
+    let func_ptrs: Vec<*mut vef_func_desc_t> =
+        all_funcs().map(|d| build_func_ptr(d, protocol)).collect();
     let func_count = u32::try_from(func_ptrs.len()).expect("func count exceeds u32");
     let funcs_ptr = Box::into_raw(func_ptrs.into_boxed_slice()).cast::<*mut vef_func_desc_t>();
 
@@ -1247,8 +1571,8 @@ pub unsafe fn build_registration(
         Box::into_raw(cap_raws).cast::<vef_required_capability_t>();
 
     Box::into_raw(Box::new(vef_registration_t {
-        protocol: vef_protocol_t_VEF_PROTOCOL_3,
-        error_msg: std::ptr::null_mut(),
+        protocol,
+        error_msg,
         deprecated_extension_version: std::ptr::null(),
         sdk_version: villagesql_sys::SDK_VERSION,
         deprecated_extension_name: std::ptr::null(),
@@ -1406,8 +1730,9 @@ macro_rules! extension {
     ) => {
         #[no_mangle]
         pub unsafe extern "C" fn vef_register(
-            _arg: *const $crate::sys::vef_register_arg_t,
+            arg: *const $crate::sys::vef_register_arg_t,
         ) -> *mut $crate::sys::vef_registration_t {
+            $crate::record_server(arg);
             let funcs: &[$crate::FuncDescriptor] = &[$($func_desc),*];
             let types: ::std::vec::Vec<$crate::TypeWithFuncs> = vec![$($type_desc),*];
             let caps: &[$crate::preview::RequiredCapability] = &[$($crate::preview::Capability::request($cap)),*];
@@ -1459,6 +1784,27 @@ macro_rules! extension {
     };
 }
 
+/// Internal: the `bind` field of a [`FuncDescriptor`]. With no hook, `None`.
+/// With one, generates the `extern "C"` trampoline the server calls and
+/// evaluates to `Some` of it. Not part of the public API.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __vsql_bind_fn {
+    () => {
+        None
+    };
+    ($bind:ident) => {{
+        unsafe extern "C" fn __vsql_bind_trampoline(
+            _ctx: *mut $crate::sys::vef_context_t,
+            args: *mut $crate::sys::vef_bind_types_args_t,
+            result: *mut $crate::sys::vef_bind_types_result_t,
+        ) {
+            $crate::dispatch_bind($bind, args, result);
+        }
+        Some(__vsql_bind_trampoline)
+    }};
+}
+
 /// Build a [`FuncDescriptor`] for one VDF and generate its `extern "C"` trampoline.
 ///
 /// The first three arguments are always the same: the Rust function, the name SQL
@@ -1489,6 +1835,7 @@ macro_rules! extension {
 /// | `state:` | Type of the value carried across every row of one statement. | none |
 /// | `prerun:` | Function that allocates that value before the first row. | none |
 /// | `postrun:` | Function that runs teardown after the last row, before the SDK drops the state. | none |
+/// | `bind:` | Function that decides type parameters when the statement is resolved. Always last. | none |
 ///
 /// Set `deterministic: true` only for a pure function. The server refuses a
 /// non-deterministic VDF in a generated column or a `CHECK` constraint, so the flag
@@ -1531,6 +1878,39 @@ macro_rules! extension {
 /// ```
 ///
 /// See `examples/vsql_call_index` for the complete crate.
+///
+/// # Deciding type parameters
+///
+/// `bind:` names a `fn(BindArgs, BindResult)` hook. The server calls it once, when
+/// the statement is resolved and before any row is read, for a function whose
+/// result's type parameters the built-in rules cannot work out: for example when
+/// they come from a constant argument, as in `TYPEID('user')`. The hook reads the
+/// arguments through [`BindArgs`] and answers through [`BindResult`]. A hook
+/// replaces the built-in rules for that function, so it must decide everything
+/// they would have.
+///
+/// ```no_run
+/// # use villagesql::{BindArgs, BindResult, InValue, Params, TypeParameters, VdfReturn};
+/// # struct TypeIdParams { prefix: String }
+/// # impl TypeParameters for TypeIdParams {
+/// #     fn parse(p: Params) -> Self { TypeIdParams { prefix: p.get("prefix").unwrap_or("").to_string() } }
+/// #     fn to_strings(&self) -> Vec<(String, String)> { vec![("prefix".to_string(), self.prefix.clone())] }
+/// # }
+/// # fn typeid(_args: &[InValue]) -> VdfReturn { VdfReturn::null() }
+/// // TYPEID('user') returns a typeid whose prefix is 'user'.
+/// fn typeid_bind(args: BindArgs, mut out: BindResult) {
+///     let Some(prefix) = args.at(0).and_then(|a| a.const_str()) else {
+///         out.error("typeid: the prefix must be a constant string");
+///         return;
+///     };
+///     out.set_return(&TypeIdParams { prefix: prefix.to_string() });
+/// }
+///
+/// let d = villagesql::func!(typeid, "typeid",
+///     [villagesql::Type::String] -> villagesql::custom!("typeid"),
+///     deterministic: true, bind: typeid_bind);
+/// # let _ = d;
+/// ```
 #[macro_export]
 macro_rules! func {
     // Prerun form: a function that owns per-statement state (setup in prerun,
@@ -1538,7 +1918,7 @@ macro_rules! func {
     // names the setup fn. See the arm below for an optional author `postrun:`
     // hook that runs teardown just before auto-free.
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     state: $state:ty,  prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
+     state: $state:ty,  prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr$(, bind: $bind:ident)?) => {{
         $crate::paste::paste! {
             // row trampoline borrows the state.
             unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
@@ -1578,21 +1958,22 @@ macro_rules! func {
                 postrun: Some([< __vsql_postrun_ $impl_fn >]),
                 clear: None,
                 accumulate: None,
+                bind: $crate::__vsql_bind_fn!($($bind)?),
             }
         }
      }};
 
     // Prerun form, defaults: server buffer size, non-deterministic.
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     state: $state:ty, prerun: $prerun:ident) => {
+     state: $state:ty, prerun: $prerun:ident$(, bind: $bind:ident)?) => {
         $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
-            state: $state, prerun: $prerun, buffer_size: 0, deterministic: false)
+            state: $state, prerun: $prerun, buffer_size: 0, deterministic: false$(, bind: $bind)?)
     };
     // Prerun and author postrun: state with custom teardown that runs before
     // the automatic drop. `postrun:` names a fn(&mut State).
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
      state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident,
-     buffer_size: $bs:expr, deterministic: $det:expr) => {{
+     buffer_size: $bs:expr, deterministic: $det:expr$(, bind: $bind:ident)?) => {{
         $crate::paste::paste! {
             unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
                 _ctx: *mut $crate::sys::vef_context_t,
@@ -1629,22 +2010,23 @@ macro_rules! func {
                 postrun: Some([< __vsql_postrun_ $impl_fn >]),
                 clear: None,
                 accumulate: None,
+                bind: $crate::__vsql_bind_fn!($($bind)?),
             }
         }
     }};
 
     // Prerun and postrun, defaults (server buffer size, non-deterministic).
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-        state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident) => {
+        state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident$(, bind: $bind:ident)?) => {
             $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
                 state: $state, prerun: $prerun, postrun: $postrun,
-                buffer_size: 0, deterministic: false)
+                buffer_size: 0, deterministic: false$(, bind: $bind)?)
     };
     // Full form: declare the result-buffer size and determinism. `buffer_size`
     // is a plain value (ideally computed from data, not a magic literal); 0
     // uses the server default (256 bytes).
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     buffer_size: $bs:expr, deterministic: $det:expr) => {{
+     buffer_size: $bs:expr, deterministic: $det:expr$(, bind: $bind:ident)?) => {{
         $crate::paste::paste! {
             unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
                 _ctx: *mut $crate::sys::vef_context_t,
@@ -1667,24 +2049,25 @@ macro_rules! func {
                 postrun: None,
                 clear: None,
                 accumulate: None,
+                bind: $crate::__vsql_bind_fn!($($bind)?),
             }
         }
     }};
     // buffer_size only (determinism defaults to false).
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     buffer_size: $bs:expr) => {
+     buffer_size: $bs:expr$(, bind: $bind:ident)?) => {
         $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
-            buffer_size: $bs, deterministic: false)
+            buffer_size: $bs, deterministic: false$(, bind: $bind)?)
     };
     // deterministic only (buffer_size defaults to 0 = server default).
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     deterministic: $det:expr) => {
+     deterministic: $det:expr$(, bind: $bind:ident)?) => {
         $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
-            buffer_size: 0, deterministic: $det)
+            buffer_size: 0, deterministic: $det$(, bind: $bind)?)
     };
-    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr) => {
+    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr$(, bind: $bind:ident)?) => {
         $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
-            buffer_size: 0, deterministic: false)
+            buffer_size: 0, deterministic: false$(, bind: $bind)?)
     };
 }
 
@@ -1801,6 +2184,7 @@ macro_rules! agg_func {
                 postrun: Some([< __vsql_postrun_ $result_fn >]),
                 clear: Some([< __vsql_clear_ $result_fn >]),
                 accumulate: Some([< __vsql_accumulate_ $result_fn >]),
+                bind: None,
             }
         }
     }};
@@ -1832,7 +2216,9 @@ macro_rules! agg_func {
 /// | Neither | The function accepts whatever it is given |
 ///
 /// Any form may end with `buffer_size:` and `deterministic:` together, meaning the
-/// same as in [`func!`].
+/// same as in [`func!`], and then with `bind:`, also as in [`func!`]. For a varargs
+/// function, [`BindResult::set_arg_type`] can also say which custom type a
+/// constant argument should be read as.
 ///
 /// With `state:`, the row function takes `fn(&mut T, &[InValue]) -> VdfReturn`.
 /// Without it, `fn(&[InValue]) -> VdfReturn`. A `state:` form may also name
@@ -1878,7 +2264,7 @@ macro_rules! varargs_func {
     // State and author postrun (full form).
     ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
      state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident,
-     buffer_size: $bs:expr, deterministic: $det:expr) => {{
+     buffer_size: $bs:expr, deterministic: $det:expr$(, bind: $bind:ident)?) => {{
         $crate::paste::paste! {
             unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
                 _ctx: *mut $crate::sys::vef_context_t,
@@ -1914,20 +2300,21 @@ macro_rules! varargs_func {
                 postrun: Some([< __vsql_postrun_ $impl_fn >]),
                 clear: None,
                 accumulate: None,
+                bind: $crate::__vsql_bind_fn!($($bind)?),
             }
         }
     }};
 
     // State + author postrun (shorthand).
     ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
-     state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident) => {
+     state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident$(, bind: $bind:ident)?) => {
         $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
             state: $state, prerun: $prerun, postrun: $postrun,
-            buffer_size: 0, deterministic: false)
+            buffer_size: 0, deterministic: false$(, bind: $bind)?)
     };
     // Full form: buffer size + determinism specified.
     ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
-     state: $state:ty, prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
+     state: $state:ty, prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr$(, bind: $bind:ident)?) => {{
         $crate::paste::paste! {
             // row trampoline borrows the state.
             unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
@@ -1966,20 +2353,21 @@ macro_rules! varargs_func {
                 postrun: Some([< __vsql_postrun_ $impl_fn >]),
                 clear: None,
                 accumulate: None,
+                bind: $crate::__vsql_bind_fn!($($bind)?),
             }
         }
     }};
 
     // Shorthand: server-default buffer size, non-deterministic.
     ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
-     state: $state:ty, prerun: $prerun:ident) => {
+     state: $state:ty, prerun: $prerun:ident$(, bind: $bind:ident)?) => {
         $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
-            state: $state, prerun: $prerun, buffer_size: 0, deterministic: false)
+            state: $state, prerun: $prerun, buffer_size: 0, deterministic: false$(, bind: $bind)?)
     };
 
     // Prerun-only form: validation (+ optional buffer sizing), no state.
     ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
-        prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
+        prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr$(, bind: $bind:ident)?) => {{
             $crate::paste::paste! {
                 // row trampoline: STATELESS. dispatch_vdf, not _with_state.
                 unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
@@ -2010,19 +2398,20 @@ macro_rules! varargs_func {
                     postrun: None,
                     clear: None,
                     accumulate: None,
+                    bind: $crate::__vsql_bind_fn!($($bind)?),
                 }
             }
         }};
 
         // Prerun-only shorthand.
-        ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr, prerun: $prerun:ident) => {
+        ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr, prerun: $prerun:ident$(, bind: $bind:ident)?) => {
             $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
-                prerun: $prerun, buffer_size: 0, deterministic: false)
+                prerun: $prerun, buffer_size: 0, deterministic: false$(, bind: $bind)?)
         };
 
         // Bare form: no prerun, no state, no validation (server-default buffer).
         ($impl_fn: ident, $sql_name:literal, [..] -> $ret:expr,
-            buffer_size: $bs:expr, deterministic: $det:expr) => {{
+            buffer_size: $bs:expr, deterministic: $det:expr$(, bind: $bind:ident)?) => {{
                 $crate::paste::paste! {
                     unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
                         _ctx: *mut $crate::sys::vef_context_t,
@@ -2044,14 +2433,15 @@ macro_rules! varargs_func {
                         postrun: None,
                         clear: None,
                         accumulate: None,
+                        bind: $crate::__vsql_bind_fn!($($bind)?),
                     }
                 }
             }};
 
             // Bare shorthand.
-            ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr) => {
+            ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr$(, bind: $bind:ident)?) => {
                 $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
-                    buffer_size: 0, deterministic: false)
+                    buffer_size: 0, deterministic: false$(, bind: $bind)?)
             };
 }
 
@@ -2204,6 +2594,7 @@ macro_rules! __vsql_type_vdfs {
                 postrun: None,
                 clear: None,
                 accumulate: None,
+                bind: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::to_string\0").as_bytes().as_ptr()
@@ -2218,6 +2609,7 @@ macro_rules! __vsql_type_vdfs {
                 postrun: None,
                 clear: None,
                 accumulate: None,
+                bind: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::compare\0").as_bytes().as_ptr()
@@ -2232,6 +2624,7 @@ macro_rules! __vsql_type_vdfs {
                 postrun: None,
                 clear: None,
                 accumulate: None,
+                bind: None,
             });
             $(
                 __embedded.push($crate::FuncDescriptor {
@@ -2247,6 +2640,7 @@ macro_rules! __vsql_type_vdfs {
                     postrun: None,
                     clear: None,
                     accumulate: None,
+                    bind: None,
                 });
             )?
             $(
@@ -2263,6 +2657,7 @@ macro_rules! __vsql_type_vdfs {
                     postrun: None,
                     clear: None,
                     accumulate: None,
+                    bind: None,
                 });
             )?
             __embedded
@@ -2285,9 +2680,7 @@ macro_rules! __vsql_type_vdfs_typed {
         int_to_params: $i2p_fn:ident,
         resolve_params: $rp_fn:ident,
         max_decode_buffer_length: $max_dec:expr,
-        params_type: $p_ty:ty,
-        params_parse: $parse_fn:ident,
-        params_to_strings: $to_strings_fn:ident
+        params_type: $p_ty:ty
         $(, hash: $hash_fn:ident)?
         $(, intrinsic_default_fn: $default_fn:ident)?
         $(,)?
@@ -2304,7 +2697,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 result: *mut $crate::sys::vef_vdf_result_t,
             ) {
                 $crate::dispatch_from_string_typed(
-                    $enc_fn, $parse_fn, $to_strings_fn, args, result
+                    $enc_fn, <$p_ty as $crate::TypeParameters>::parse, <$p_ty as $crate::TypeParameters>::to_strings, args, result
                 );
             }
             static [< __VSQL_FROM_STRING_PARAMS_ $enc_fn:upper >]: &[$crate::Type] =
@@ -2316,7 +2709,7 @@ macro_rules! __vsql_type_vdfs_typed {
             ) -> $crate::VdfReturn {
                 match args.get(0) {
                     Some($crate::InValue::CustomWithParams{ bytes: b, params: tp }) => {
-                        let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, $parse_fn);
+                        let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, <$p_ty as $crate::TypeParameters>::parse);
                         match $dec_fn(b, p) {
                             Ok(s) => $crate::VdfReturn::String(s),
                             Err(e) => $crate::VdfReturn::error(e),
@@ -2347,7 +2740,7 @@ macro_rules! __vsql_type_vdfs_typed {
                         Some($crate::InValue::CustomWithParams{ bytes: a, params: tp }),
                         Some($crate::InValue::CustomWithParams{ bytes: b, .. }),
                     ) => {
-                        let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, $parse_fn);
+                        let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, <$p_ty as $crate::TypeParameters>::parse);
                         $crate::VdfReturn::Int(match $cmp_fn(a, b, p) {
                             ::std::cmp::Ordering::Less => -1,
                             ::std::cmp::Ordering::Equal => 0,
@@ -2376,7 +2769,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 ) -> $crate::VdfReturn {
                     match args.get(0) {
                         Some($crate::InValue::CustomWithParams{ bytes: b, params: tp }) => {
-                            let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, $parse_fn);
+                            let p = [< __VSQL_PARAMS_CACHE_ $dec_fn:upper >].get(*tp, <$p_ty as $crate::TypeParameters>::parse);
                             $crate::VdfReturn::Int($hash_fn(b, p) as i64)
                         }
                         Some($crate::InValue::Null) | None => $crate::VdfReturn::null(),
@@ -2455,7 +2848,7 @@ macro_rules! __vsql_type_vdfs_typed {
                     args: *mut $crate::sys::vef_vdf_args_t,
                     result: *mut $crate::sys::vef_vdf_result_t,
                 ) {
-                    $crate::dispatch_intrinsic_default_typed($default_fn, $parse_fn, args, result);
+                    $crate::dispatch_intrinsic_default_typed($default_fn, <$p_ty as $crate::TypeParameters>::parse, args, result);
                 }
                 static [< __VSQL_INTRINSIC_DEFAULT_PARAMS_ $default_fn:upper >]: &[$crate::Type] = &[];
             )?
@@ -2477,6 +2870,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 postrun: None,
                 clear: None,
                 accumulate: None,
+                bind: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::to_string\0").as_bytes().as_ptr()
@@ -2491,6 +2885,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 postrun: None,
                 clear: None,
                 accumulate: None,
+                bind: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::compare\0").as_bytes().as_ptr()
@@ -2505,6 +2900,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 postrun: None,
                 clear: None,
                 accumulate: None,
+                bind: None,
             });
             $(
                 __embedded.push($crate::FuncDescriptor {
@@ -2520,6 +2916,7 @@ macro_rules! __vsql_type_vdfs_typed {
                     postrun: None,
                     clear: None,
                     accumulate: None,
+                    bind: None,
                 });
             )?
             __embedded.push($crate::FuncDescriptor {
@@ -2535,6 +2932,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 postrun: None,
                 clear: None,
                 accumulate: None,
+                bind: None,
             });
             __embedded.push($crate::FuncDescriptor {
                 sql_name: concat!($type_name, "::resolve_params\0").as_bytes().as_ptr()
@@ -2549,6 +2947,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 postrun: None,
                 clear: None,
                 accumulate: None,
+                bind: None,
             });
             $(
                 __embedded.push($crate::FuncDescriptor {
@@ -2564,6 +2963,7 @@ macro_rules! __vsql_type_vdfs_typed {
                     postrun: None,
                     clear: None,
                     accumulate: None,
+                    bind: None,
                 });
             )?
 
@@ -2740,8 +3140,9 @@ macro_rules! custom_type {
 /// 2. `resolve_params:` receives those parameters and returns a [`Resolved`] giving
 ///    the persisted length and the decode buffer length for this column. It also
 ///    validates them; returning `Err` rejects the DDL with your message.
-/// 3. `params_parse:` turns the parameter string into your own typed struct, once,
-///    cached thereafter. Every later call gets that struct rather than re-parsing.
+/// 3. Your [`TypeParameters::parse`] turns the parameter string into your own
+///    typed struct, once, cached thereafter. Every later call gets that struct
+///    rather than re-parsing.
 ///
 /// [`Resolved::rewrite`] is the form to return when resolution fills in a default.
 /// The rewritten parameters are what the server persists, so a column declared
@@ -2760,9 +3161,7 @@ macro_rules! custom_type {
 /// | `compare:` | `fn(&[u8], &[u8], &P) -> std::cmp::Ordering` |
 /// | `int_to_params:` | `fn(i64) -> Result<String, String>` — the `TVECTOR(768)` shorthand |
 /// | `resolve_params:` | `fn(Params) -> Result<Resolved, String>` — validate and size |
-/// | `params_type:` | Your parsed parameter struct, `P` |
-/// | `params_parse:` | `fn(Params) -> P` |
-/// | `params_to_strings:` | `fn(&P) -> Vec<(String, String)>` — `P` back to pairs |
+/// | `params_type:` | Your parsed parameter struct, `P`. It must implement [`TypeParameters`]. |
 ///
 /// Note the two differences from [`custom_type!`] that are easy to miss: the size key
 /// is `max_persisted_length`, not `persisted_length`, and `decode`, `compare`, and
@@ -2789,16 +3188,18 @@ macro_rules! custom_type {
 ///
 /// ```no_run
 /// # use std::cmp::Ordering;
-/// # use villagesql::{MaybeParams, Params, Resolved};
+/// # use villagesql::{MaybeParams, Params, Resolved, TypeParameters};
 /// // A vector of `dimension` little-endian f32 values.
 /// struct TvectorParams { dimension: usize }
 ///
-/// fn tvector_parse(params: Params) -> TvectorParams {
-///     TvectorParams { dimension: params.get("dimension").and_then(|d| d.parse().ok()).unwrap_or(0) }
-/// }
+/// impl TypeParameters for TvectorParams {
+///     fn parse(params: Params) -> Self {
+///         TvectorParams { dimension: params.get("dimension").and_then(|d| d.parse().ok()).unwrap_or(0) }
+///     }
 ///
-/// fn tvector_to_strings(p: &TvectorParams) -> Vec<(String, String)> {
-///     vec![("dimension".to_string(), p.dimension.to_string())]
+///     fn to_strings(&self) -> Vec<(String, String)> {
+///         vec![("dimension".to_string(), self.dimension.to_string())]
+///     }
 /// }
 ///
 /// // `TVECTOR(768)` reaches this as the bare integer.
@@ -2839,8 +3240,6 @@ macro_rules! custom_type {
 ///     int_to_params: tvector_int_to_params,
 ///     resolve_params: tvector_resolve_params,
 ///     params_type: TvectorParams,
-///     params_parse: tvector_parse,
-///     params_to_strings: tvector_to_strings,
 ///     intrinsic_default_fn: tvector_default,
 /// );
 /// # let _ = t;
@@ -2858,9 +3257,7 @@ macro_rules! parameterized_type {
         compare: $cmp_fn:ident,
         int_to_params: $i2p_fn:ident,
         resolve_params: $rp_fn:ident,
-        params_type: $p_ty:ty,
-        params_parse: $parse_fn:ident,
-        params_to_strings: $to_strings_fn:ident
+        params_type: $p_ty:ty
         $(, hash: $hash_fn:ident)?
         $(, default: $default_str:literal)?
         $(, intrinsic_default_fn: $default_fn:ident)?
@@ -2876,9 +3273,7 @@ macro_rules! parameterized_type {
             int_to_params: $i2p_fn,
             resolve_params: $rp_fn,
             max_decode_buffer_length: $max_dec,
-            params_type: $p_ty,
-            params_parse: $parse_fn,
-            params_to_strings: $to_strings_fn
+            params_type: $p_ty
             $(, hash: $hash_fn)?
             $(, intrinsic_default_fn: $default_fn)?
         );

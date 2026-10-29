@@ -1,0 +1,140 @@
+# bind_and_check_types through the Rust SDK's `bind:` option.
+#
+# tvector_concat and tvector_concat_all port the C++ SDK's vsql-tvector example
+# (see its tvector_concat.test). padint_with_width covers the TYPEID('user')
+# pattern: the result's type parameters come from a constant string argument.
+
+INSTALL EXTENSION sdk_coverage;
+
+CREATE TABLE v2 (id INT PRIMARY KEY, v tvector(2));
+CREATE TABLE v3 (id INT PRIMARY KEY, v tvector(3));
+INSERT INTO v2 VALUES (1, '[1,2]');
+INSERT INTO v3 VALUES (1, '[3,4,5]');
+
+--echo #
+--echo # 1. set_return: two columns of different dimensions give tvector(M+N).
+--echo #
+SELECT tvector_concat(a.v, b.v) AS c FROM v2 a, v3 b;
+SELECT tvector_concat(b.v, a.v) AS c FROM v2 a, v3 b;
+--echo # Same dimension on both sides still concatenates rather than copying.
+SELECT tvector_concat(a.v, b.v) AS c FROM v2 a, v2 b;
+--echo # The result really is tvector(5): it stores into a tvector(5) column.
+CREATE TABLE v5 (v tvector(5));
+INSERT INTO v5 SELECT tvector_concat(a.v, b.v) FROM v2 a, v3 b;
+SELECT v FROM v5;
+
+--echo #
+--echo # 2. set_arg: a literal gets its params from the hook, on either side.
+--echo #
+SELECT tvector_concat('[7,8]', v) AS c FROM v3;
+SELECT tvector_concat(v, '[7]') AS c FROM v3;
+SELECT tvector_concat('[1,2]', '[3,4,5]') AS c;
+
+--echo #
+--echo # 3. error(): rejected at resolution time, before any row is read.
+--echo #
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT tvector_concat('[]', '[1,2]') AS c;
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT tvector_concat('not a vector', '[1]') AS c;
+CREATE TABLE texts (t VARCHAR(32));
+INSERT INTO texts VALUES ('[1,2]');
+--echo # A non-constant string has no value the hook can count.
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT tvector_concat(t, '[1]') FROM texts;
+
+--echo #
+--echo # 4. params::<P>(): the element type comes from the resolved side, and two
+--echo #    resolved sides must agree.
+--echo #
+CREATE TABLE d3 (id INT PRIMARY KEY, v tvector('dimension=3,type=double'));
+INSERT INTO d3 VALUES (1, '[1.5,2.5,3.5]');
+SELECT tvector_concat(v, '[4.5]') AS c FROM d3;
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT tvector_concat(a.v, b.v) FROM d3 a, v3 b;
+
+--echo #
+--echo # 5. The combined dimension is bounded by the type's maximum. The vectors
+--echo #    are built with CONCAT, a constant expression. A fixed-arity custom-type
+--echo #    parameter takes only a plain literal, so the server rejects it before
+--echo #    the hook runs; a varargs call passes it to the hook as a constant.
+--echo #
+--disable_abort_on_error
+SELECT JSON_LENGTH(tvector_concat(CONCAT('[', REPEAT('1,', 2047), '1]'), '[2]')) AS dims;
+--enable_abort_on_error
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT tvector_concat_all(CONCAT('[', REPEAT('1,', 2047), '1]'),
+                          CONCAT('[', REPEAT('1,', 2047), '1]'), '[1]');
+
+--echo #
+--echo # 6. NULL propagates from the row function.
+--echo #
+INSERT INTO v3 VALUES (2, NULL);
+SELECT id, tvector_concat(v, '[7]') IS NULL AS is_null FROM v3 ORDER BY id;
+
+--echo #
+--echo # 7. Varargs: set_arg_with_type names a literal's type.
+--echo #
+SELECT tvector_concat_all('[1]', '[2,3]', '[4,5,6]') AS c;
+SELECT tvector_concat_all(a.v, '[9]', b.v) AS c FROM v2 a, v3 b WHERE b.id = 1;
+SELECT tvector_concat_all('[1,2]') AS c;
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT tvector_concat_all();
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT tvector_concat_all('[1]', 5);
+
+--echo #
+--echo # 8. The TYPEID('user') pattern: the result's params come from a constant
+--echo #    string. The probes below record how such a result behaves, which is
+--echo #    what returning a custom type instead of text would mean for TYPEID.
+--echo #
+SELECT padint_with_width('5', 42) AS p;
+CREATE TABLE p5 (p padint(5));
+INSERT INTO p5 VALUES (padint_with_width('5', 7));
+SELECT p FROM p5;
+
+--disable_abort_on_error
+--echo # Into a column with a different width.
+INSERT INTO p5 VALUES (padint_with_width('3', 8));
+--echo # Used as text.
+SELECT padint_with_width('5', 42) REGEXP '^0+42$' AS regexp_match;
+SELECT LENGTH(padint_with_width('5', 42)) AS len;
+SELECT CONCAT('n=', padint_with_width('5', 42)) AS concatenated;
+--echo # Stored into a VARCHAR column.
+CREATE TABLE vc (s VARCHAR(20));
+INSERT INTO vc VALUES (padint_with_width('5', 42));
+SELECT HEX(s) AS stored_hex FROM vc;
+--enable_abort_on_error
+
+--echo # A NULL width, a non-constant width, and a prepared-statement parameter
+--echo # as the width are rejected when the statement is resolved.
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT padint_with_width(NULL, 42) AS p;
+CREATE TABLE widths (w VARCHAR(4));
+INSERT INTO widths VALUES ('5');
+--error ER_VILLAGESQL_GENERIC_ERROR
+SELECT padint_with_width(w, 42) AS p FROM widths;
+--error ER_VILLAGESQL_GENERIC_ERROR
+PREPARE s FROM 'SELECT padint_with_width(?, 42) AS p';
+
+--echo # A constant width with a prepared-statement parameter as the value: the
+--echo # hook runs once at PREPARE, and each EXECUTE uses the bound value.
+PREPARE s FROM 'SELECT padint_with_width(''5'', ?) AS p';
+SET @n = 7;
+EXECUTE s USING @n;
+SET @n = 42;
+EXECUTE s USING @n;
+DEALLOCATE PREPARE s;
+
+--echo #
+--echo # Cleanup
+--echo #
+DROP TABLE widths;
+DROP TABLE vc;
+DROP TABLE p5;
+DROP TABLE d3;
+DROP TABLE texts;
+DROP TABLE v5;
+DROP TABLE v3;
+DROP TABLE v2;
+UNINSTALL EXTENSION sdk_coverage;
