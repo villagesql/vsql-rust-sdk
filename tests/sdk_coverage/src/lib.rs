@@ -8,7 +8,10 @@
     clippy::must_use_candidate
 )]
 
-use villagesql::{InValue, MaybeParams, Params, Resolved, VdfReturn};
+use villagesql::{
+    BindArg, BindArgs, BindResult, InValue, MaybeParams, Params, Resolved, TypeParameters,
+    VdfReturn,
+};
 
 // ── Identity functions ────────────────────────────────────────────────────────
 
@@ -159,16 +162,18 @@ pub struct PadintParams {
     pub width: u32,
 }
 
-pub fn padint_parse(params: Params) -> PadintParams {
-    let width = params
-        .get("width")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    PadintParams { width }
-}
+impl TypeParameters for PadintParams {
+    fn parse(params: Params) -> Self {
+        let width = params
+            .get("width")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        PadintParams { width }
+    }
 
-pub fn padint_to_strings(p: &PadintParams) -> Vec<(String, String)> {
-    vec![("width".to_string(), p.width.to_string())]
+    fn to_strings(&self) -> Vec<(String, String)> {
+        vec![("width".to_string(), self.width.to_string())]
+    }
 }
 
 pub struct TvectorParams {
@@ -176,32 +181,34 @@ pub struct TvectorParams {
     pub bytes_per_elem: usize,
 }
 
-pub fn tvector_parse(params: Params) -> TvectorParams {
-    let dimension = params
-        .get("dimension")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let bytes_per_elem = if params.get("type") == Some("double") {
-        8
-    } else {
-        4
-    };
-    TvectorParams {
-        dimension,
-        bytes_per_elem,
+impl TypeParameters for TvectorParams {
+    fn parse(params: Params) -> Self {
+        let dimension = params
+            .get("dimension")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let bytes_per_elem = if params.get("type") == Some("double") {
+            8
+        } else {
+            4
+        };
+        TvectorParams {
+            dimension,
+            bytes_per_elem,
+        }
     }
-}
 
-pub fn tvector_to_strings(p: &TvectorParams) -> Vec<(String, String)> {
-    let ty = if p.bytes_per_elem == 8 {
-        "double"
-    } else {
-        "float"
-    };
-    vec![
-        ("dimension".to_string(), p.dimension.to_string()),
-        ("type".to_string(), ty.to_string()),
-    ]
+    fn to_strings(&self) -> Vec<(String, String)> {
+        let ty = if self.bytes_per_elem == 8 {
+            "double"
+        } else {
+            "float"
+        };
+        vec![
+            ("dimension".to_string(), self.dimension.to_string()),
+            ("type".to_string(), ty.to_string()),
+        ]
+    }
 }
 
 pub fn tvector_int_to_params(n: i64) -> Result<String, String> {
@@ -251,26 +258,29 @@ pub fn tvector_resolve_params(params: Params) -> Result<Resolved, String> {
     ))
 }
 
-#[allow(clippy::cast_possible_truncation)]
-pub fn tvector_encode(s: &str, params: &mut MaybeParams<TvectorParams>) -> Result<Vec<u8>, String> {
-    // Parse "[a,b,c]" into f64 elements.
+/// Parse a tvector's text form, `[a,b,c]`, into its elements.
+fn parse_tvector_text(s: &str) -> Result<Vec<f64>, String> {
     let inner = s
         .trim()
         .strip_prefix('[')
         .and_then(|x| x.strip_suffix(']'))
         .ok_or_else(|| "tvector: expected '[...]'".to_string())?;
-    let elems: Vec<f64> = if inner.trim().is_empty() {
-        Vec::new()
-    } else {
-        inner
-            .split(',')
-            .map(|t| {
-                t.trim()
-                    .parse::<f64>()
-                    .map_err(|e| format!("tvector: bad element: {e}"))
-            })
-            .collect::<Result<Vec<f64>, String>>()?
-    };
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    inner
+        .split(',')
+        .map(|t| {
+            t.trim()
+                .parse::<f64>()
+                .map_err(|e| format!("tvector: bad element: {e}"))
+        })
+        .collect()
+}
+
+#[allow(clippy::cast_possible_truncation)]
+pub fn tvector_encode(s: &str, params: &mut MaybeParams<TvectorParams>) -> Result<Vec<u8>, String> {
+    let elems = parse_tvector_text(s)?;
 
     // Params from the column, or inferred from the literal (dimension = count).
     let (dimension, bytes_per_elem) = if let Some(p) = params.get() {
@@ -351,6 +361,190 @@ pub fn tvector_default(p: &TvectorParams) -> Result<String, String> {
     Ok(format!("[{}]", vec!["0"; n].join(",")))
 }
 
+// ── bind_and_check_types hooks ────────────────────────────────────────────────
+//
+// tvector_concat and tvector_concat_all port the C++ SDK's vsql-tvector
+// example. padint_with_width is the TYPEID('user') pattern: the result's type
+// parameters come from a constant string argument.
+
+const TVECTOR_MAX_DIMENSION: i64 = 4096;
+/// Largest tvector in bytes: the maximum dimension of 8-byte doubles.
+const TVECTOR_MAX_BYTES: usize = 32_768;
+/// A literal has no element type of its own; float is tvector's default.
+const DEFAULT_BYTES_PER_ELEM: usize = 4;
+
+/// The element width every argument will use. A constant has none of its own,
+/// so it takes whichever argument the server resolved; where more than one is
+/// resolved they must agree.
+fn common_element_width(args: BindArgs) -> Result<usize, String> {
+    let mut resolved: Option<usize> = None;
+    for i in 0..args.len() {
+        let Some(p) = args.at(i).and_then(|a| a.params::<TvectorParams>()) else {
+            continue;
+        };
+        if resolved.is_some_and(|bpe| bpe != p.bytes_per_elem) {
+            return Err("vectors must have the same element type".to_string());
+        }
+        resolved = Some(p.bytes_per_elem);
+    }
+    Ok(resolved.unwrap_or(DEFAULT_BYTES_PER_ELEM))
+}
+
+/// One argument's tvector params: the server's, when it resolved them, or
+/// counted from a constant literal. The flag is true for the latter, meaning
+/// the caller must hand the params back with `set_arg` so the server can
+/// encode the literal.
+fn bind_params_for_vector(
+    arg: &BindArg,
+    index: usize,
+    bpe: usize,
+) -> Result<(TvectorParams, bool), String> {
+    if let Some(known) = arg.params::<TvectorParams>() {
+        return Ok((known, false));
+    }
+    let n = index + 1;
+    let text = arg
+        .const_str()
+        .ok_or_else(|| format!("argument {n} must be a tvector or a constant vector literal"))?;
+    let elems =
+        parse_tvector_text(text).map_err(|_| format!("argument {n} is not a vector literal"))?;
+    if elems.is_empty() {
+        return Err(format!(
+            "argument {n} is empty; a tvector must have at least one element"
+        ));
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    if bpe == 4 && elems.iter().any(|e| !(*e as f32).is_finite()) {
+        return Err(format!(
+            "argument {n} has an element that is not a finite float value"
+        ));
+    }
+    let dimension = i64::try_from(elems.len()).unwrap_or(i64::MAX);
+    if dimension > TVECTOR_MAX_DIMENSION {
+        return Err(format!(
+            "argument {n} has {dimension} elements; the maximum is {TVECTOR_MAX_DIMENSION}"
+        ));
+    }
+    Ok((
+        TvectorParams {
+            dimension,
+            bytes_per_elem: bpe,
+        },
+        true,
+    ))
+}
+
+/// The shared half of both concat hooks: resolve every argument as a tvector,
+/// hand back params for the literals, and return the concatenation's params.
+/// A varargs call has no signature saying its arguments are tvectors, so there
+/// the literal's type is named too.
+fn bind_concat(
+    args: BindArgs,
+    out: &mut BindResult,
+    varargs: bool,
+) -> Result<TvectorParams, String> {
+    let bpe = common_element_width(args)?;
+    let mut total = 0;
+    for i in 0..args.len() {
+        let Some(arg) = args.at(i) else { continue };
+        let (params, needs_publish) = bind_params_for_vector(&arg, i, bpe)?;
+        total += params.dimension;
+        if needs_publish {
+            if varargs {
+                out.set_arg_with_type(i, "tvector", &params);
+            } else {
+                out.set_arg(i, &params);
+            }
+        }
+    }
+    if total > TVECTOR_MAX_DIMENSION {
+        return Err(format!(
+            "combined dimension {total} exceeds the maximum of {TVECTOR_MAX_DIMENSION}"
+        ));
+    }
+    Ok(TvectorParams {
+        dimension: total,
+        bytes_per_elem: bpe,
+    })
+}
+
+/// `tvector_concat(tvector(M), tvector(N))` -> `tvector(M+N)`. The built-in
+/// rules would reject arguments whose dimensions differ, and could only copy M
+/// or N onto the result.
+fn tvector_concat_bind(args: BindArgs, mut out: BindResult) {
+    if args.len() != 2 {
+        out.error("tvector_concat: expects 2 arguments");
+        return;
+    }
+    match bind_concat(args, &mut out, false) {
+        Ok(ret) => out.set_return(&ret),
+        Err(e) => out.error(&format!("tvector_concat: {e}")),
+    }
+}
+
+/// The variadic concat. Every argument must be a tvector or a constant literal.
+fn tvector_concat_all_bind(args: BindArgs, mut out: BindResult) {
+    if args.is_empty() {
+        out.error("tvector_concat_all: requires at least one argument");
+        return;
+    }
+    for i in 0..args.len() {
+        let name = args
+            .at(i)
+            .and_then(|a| a.ty().custom_name().map(str::to_string));
+        if let Some(name) = name.filter(|n| !n.eq_ignore_ascii_case("tvector")) {
+            out.error(&format!(
+                "tvector_concat_all: argument {} is a {name}, not a tvector",
+                i + 1
+            ));
+            return;
+        }
+    }
+    match bind_concat(args, &mut out, true) {
+        Ok(ret) => out.set_return(&ret),
+        Err(e) => out.error(&format!("tvector_concat_all: {e}")),
+    }
+}
+
+/// Row function for both concats. The hook made every argument the same
+/// element width, so concatenating the stored bytes is the whole job.
+fn tvector_concat_impl(args: &[InValue]) -> VdfReturn {
+    let mut bytes = Vec::new();
+    for arg in args {
+        match arg {
+            InValue::CustomWithParams { bytes: b, .. } | InValue::Custom(b) => {
+                bytes.extend_from_slice(b);
+            }
+            InValue::Null => return VdfReturn::null(),
+            _ => return VdfReturn::error("tvector_concat: expected tvector arguments"),
+        }
+    }
+    VdfReturn::binary(bytes)
+}
+
+/// `padint_with_width('5', 42)` -> `padint(5)`: the result's width comes from
+/// the constant string, the way `TYPEID('user')` would take its prefix.
+fn padint_with_width_bind(args: BindArgs, mut out: BindResult) {
+    let Some(text) = args.at(0).and_then(|a| a.const_str()) else {
+        out.error("padint_with_width: the width must be a constant string");
+        return;
+    };
+    match text.trim().parse::<u32>() {
+        Ok(width) if width >= 1 => out.set_return(&PadintParams { width }),
+        _ => out.error(&format!(
+            "padint_with_width: width must be a positive integer, got {text:?}"
+        )),
+    }
+}
+
+fn padint_with_width_impl(args: &[InValue]) -> VdfReturn {
+    match args.get(1) {
+        Some(InValue::Int(n)) => VdfReturn::binary(n.to_le_bytes().to_vec()),
+        Some(InValue::Null) | None => VdfReturn::null(),
+        _ => VdfReturn::error("padint_with_width: expected an INT value"),
+    }
+}
+
 // ── Extension registration ────────────────────────────────────────────────────
 
 villagesql::extension! {
@@ -361,6 +555,16 @@ villagesql::extension! {
             [villagesql::Type::Real] -> villagesql::Type::Real),
         villagesql::func!(sdk_warn_if_negative_impl, "sdk_warn_if_negative",
             [villagesql::Type::Int] -> villagesql::Type::Int),
+        villagesql::func!(tvector_concat_impl, "tvector_concat",
+            [villagesql::custom!("tvector"), villagesql::custom!("tvector")]
+                -> villagesql::custom!("tvector"),
+            buffer_size: TVECTOR_MAX_BYTES, deterministic: true, bind: tvector_concat_bind),
+        villagesql::varargs_func!(tvector_concat_impl, "tvector_concat_all",
+            [..] -> villagesql::custom!("tvector"),
+            buffer_size: TVECTOR_MAX_BYTES, deterministic: true, bind: tvector_concat_all_bind),
+        villagesql::func!(padint_with_width_impl, "padint_with_width",
+            [villagesql::Type::String, villagesql::Type::Int] -> villagesql::custom!("padint"),
+            deterministic: true, bind: padint_with_width_bind),
     ],
     types: [
         villagesql::custom_type!(
@@ -392,8 +596,6 @@ villagesql::extension! {
             int_to_params: padint_int_to_params,
             resolve_params: padint_resolve_params,
             params_type: PadintParams,
-            params_parse: padint_parse,
-            params_to_strings: padint_to_strings,
             hash: padint_hash,
             default: "0",
         ),
@@ -407,8 +609,6 @@ villagesql::extension! {
             int_to_params: tvector_int_to_params,
             resolve_params: tvector_resolve_params,
             params_type: TvectorParams,
-            params_parse: tvector_parse,
-            params_to_strings: tvector_to_strings,
             intrinsic_default_fn: tvector_default,
         ),
     ]
