@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 #
-# Compare the ABI headers vendored in include/ against the ones a real VillageSQL
-# server build ships. The generated bindings are only as correct as these copies,
-# and nothing else in CI notices when the server's headers move.
+# Compare the ABI headers vendored in include/ against the latest VillageSQL server
+# source. The generated bindings are only as correct as these copies, and nothing
+# else in CI notices when the server's headers move.
+#
+# Every header comes from the server's dev ABI (villagesql/sdk): it carries the
+# protocol 4 bind hook and the current preview capability ABIs, which is what
+# the nightly server these examples are tested against implements.
 #
 # One divergence is deliberate and allowed, in types.h: VEF_PARAM_VARARGS is spelled
 # as a literal rather than UINT_MAX, because bindgen only captures a #define it can
 # constant-fold and UINT_MAX folds differently on macOS and Linux. Any other
 # difference fails the job.
 #
-# Usage: check-vendored-headers.sh <extracted-dev-server-dir>
+# Usage: check-vendored-headers.sh <server-source-dir>
 
 set -euo pipefail
 
-SERVER_ROOT=${1:?usage: check-vendored-headers.sh <extracted-dev-server-dir>}
+SERVER_ROOT=${1:?usage: check-vendored-headers.sh <server-source-dir>}
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 OURS="$REPO_ROOT/include/villagesql/abi"
 
@@ -27,34 +31,11 @@ HEADERS=(
   preview/sql_query.h
 )
 
-# The server tarball's layout is not something this script should assume. Find the
-# stable include tree by locating types.h, and prefer include/ over include-dev/.
-CANDIDATES=()
-while IFS= read -r line; do
-  CANDIDATES+=("$line")
-done < <(find "$SERVER_ROOT" -path '*/villagesql/abi/types.h' -print | sort)
-if [ ${#CANDIDATES[@]} -eq 0 ]; then
-  echo "error: no villagesql/abi/types.h found under $SERVER_ROOT" >&2
-  echo "The server tarball layout changed, or the download step produced nothing." >&2
-  find "$SERVER_ROOT" -maxdepth 3 -type d -print >&2
+THEIRS="$SERVER_ROOT/villagesql/sdk/include/villagesql/abi"
+if [ ! -d "$THEIRS" ]; then
+  echo "error: $THEIRS not found; the server layout changed or the checkout is empty" >&2
   exit 1
 fi
-
-# A server checkout carries several abi trees. stable_sdk/v3 is the one we vendor —
-# it becomes the staged SDK's include/ — while sdk/ is the dev ABI and carries
-# protocol 4 additions we do not ship. Prefer it explicitly rather than by sort order.
-THEIRS=""
-for pattern in '*/stable_sdk/v3/include/villagesql/abi' '*/include/villagesql/abi'; do
-  for candidate in "${CANDIDATES[@]}"; do
-    dir=$(dirname "$candidate")
-    # shellcheck disable=SC2254
-    case "$dir" in
-      $pattern) THEIRS="$dir"; break 2 ;;
-    esac
-  done
-done
-# Fall back to the first match if there is no plain include/ tree.
-THEIRS=${THEIRS:-$(dirname "${CANDIDATES[0]}")}
 
 echo "Comparing $OURS against $THEIRS"
 
@@ -102,8 +83,7 @@ To fix:
   2. Re-apply the VEF_PARAM_VARARGS divergence in types.h (see the comment there).
   3. Regenerate the bindings:
        cargo build -p villagesql-sys --features villagesql-sys/regenerate-bindings
-  4. Update SDK_VERSION in villagesql-sys/src/lib.rs to the server release you
-     vendored from.
+  4. Every header comes from villagesql/sdk/include/villagesql/abi/.
 MSG
 fi
 

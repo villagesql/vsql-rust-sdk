@@ -117,20 +117,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Read the server release the headers came from
-        id: sdk
-        run: ./scripts/sdk-version.sh >> "$GITHUB_OUTPUT"
-
-      - name: Check out that server release
+      - name: Check out the latest server
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: villagesql/villagesql-server
-          ref: release/${{ steps.sdk.outputs.version }}
+          ref: main
           path: server
-          sparse-checkout: villagesql/stable_sdk/v3/include/villagesql/abi
+          sparse-checkout: villagesql/sdk/include/villagesql/abi
           sparse-checkout-cone-mode: false
 
-      - name: Diff vendored ABI headers against that release
+      - name: Diff vendored ABI headers against the latest server
         run: ./scripts/check-vendored-headers.sh server
 
   package:

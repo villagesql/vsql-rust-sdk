@@ -45,7 +45,7 @@ extern "C" {
 #define VEF_PREVIEW_SYS_VAR_NAME "vsql::sys_var"
 
 // Capability ABI version compiled into this SDK snapshot.
-#define VEF_PREVIEW_SYS_VAR_ABI_VERSION 1
+#define VEF_PREVIEW_SYS_VAR_ABI_VERSION 2
 
 // System variable value type.
 typedef enum {
@@ -53,6 +53,11 @@ typedef enum {
   VEF_VAR_INT = 1,
   VEF_VAR_DOUBLE = 2,
   VEF_VAR_STR = 3,
+  // An enumeration: the value is one of a fixed list of names, stored as a
+  // zero-based index into that list. Reads/writes as the name (e.g.
+  // SET GLOBAL ext.mode = 'sync'), so the server validates the value at SET
+  // time -- an unlisted name is rejected. Backed by an unsigned long index.
+  VEF_VAR_ENUM = 4,
 } vef_var_type_t;
 
 // Passed to on_change callbacks when a variable is SET.
@@ -68,12 +73,28 @@ typedef struct {
     // For VEF_VAR_STR: points to the newly allocated string. Valid for the
     // duration of the callback; do not retain the pointer.
     const char *str_val;
+    // For VEF_VAR_ENUM: the zero-based index of the selected name in the
+    // variable's name list (as passed to make_enum).
+    unsigned long enum_val;
   };
 } vef_sys_var_change_t;
 
 // Callback invoked after the server writes a new value for a system variable.
+//
+// Runs while the server holds its global system-variable lock, which has two
+// consequences. Reading or writing another of this extension's variables
+// through its storage pointer is safe and immediately visible to other
+// sessions, because the server reads those under the same lock. But anything
+// that re-enters the server to touch a system variable will deadlock on that
+// lock: do not call sys_var get/set, do not execute SQL, and do not wait on a
+// thread that does either. Keep the callback short and non-blocking; use a
+// thread_worker if the work needs SQL or can block.
 typedef void (*vef_sys_var_on_change_func_t)(const vef_sys_var_change_t *);
 
+// TODO(villagesql-beta): rename vef_sys_var_desc_t to vef_sys_var_cc_t
+// (capability_config) and vef_sys_var_descriptor_list_t to
+// vef_sys_var_cc_list_t to match the capability_config naming used by
+// vef_required_capability_t.capability_config.
 typedef struct {
   // Variable name (without extension prefix). Encoded using UTF-8.
   const char *name;
@@ -109,6 +130,18 @@ typedef struct {
       char **value_ptr;
       const char *def_val;
     } str;
+    struct {
+      // Backing storage: holds the zero-based index of the selected name.
+      unsigned long *value_ptr;
+      // Default value, as an index into `names`.
+      unsigned long def_val;
+      // NULL-terminated list of allowed names (the enumeration's values). The
+      // array and each string must outlive the extension (typically static),
+      // as the server builds a TYPELIB pointing at them at registration.
+      const char *const *names;
+      // Number of names (excluding the terminating NULL).
+      uint32_t name_count;
+    } enumeration;
   };
 } vef_sys_var_desc_t;
 
@@ -148,6 +181,23 @@ typedef bool (*vef_sys_var_set_func_t)(const char *component_name,
                                        const char *name, const char *scope,
                                        const char *val);
 
+// Sets an INT system variable to a signed integer value.
+//
+// An INT variable accepts only an integer: the server's string update path
+// takes a STRING_RESULT, which Sys_var_integer rejects outright. Passing the
+// value as a long long keeps the caller's type all the way to the server, so
+// nothing has to render it as text and parse it back.
+//
+// component_name: extension name (e.g. "vsql_my_ext")
+// name:           variable name without the extension prefix
+// scope:          as for vef_sys_var_set_func_t
+// val:            new value
+//
+// Returns false on success, true on error.
+typedef bool (*vef_sys_var_set_int_func_t)(const char *component_name,
+                                           const char *name, const char *scope,
+                                           long long val);
+
 typedef struct {
   // Capability ABI version. Always the first field in every capability vtable.
   uint32_t version;
@@ -155,8 +205,22 @@ typedef struct {
   // Read/write access to system variables from extension code.
   // Set by the server during capability registration; call through these
   // pointers from extension VDFs or callbacks.
+  //
+  // get returns the value as a string whatever the variable's type. For a
+  // STRING variable it is the only safe way to read one: the server owns the
+  // buffer and frees it on update, so reading the storage pointer directly
+  // races with a concurrent SET. Other types can be read straight from the
+  // storage global.
+  //
+  // Writing always goes through set/set_int, never the storage global: the
+  // server applies range clamping, PERSIST, on_change callbacks and locking,
+  // and owns the buffer behind a STRING variable. set_int serves VEF_VAR_INT;
+  // set serves every other type.
   vef_sys_var_get_func_t get;
   vef_sys_var_set_func_t set;
+
+  // Added in ABI version 2.
+  vef_sys_var_set_int_func_t set_int;
 } vef_preview_sys_var_t;
 
 #ifdef __cplusplus
