@@ -1,0 +1,67 @@
+INSTALL EXTENSION sdk_coverage;
+call mtr.add_suppression("VillageSQL.*Invalid value in column.*sdk_coverage");
+call mtr.add_suppression("VillageSQL.*hash VDF.*dispatch_vdf");
+# 1. Panic: within counter_encode
+SELECT counter::from_string('86');
+ERROR HY000: VDF error in function 'counter::from_string': dispatch_vdf
+# Two types in one extension: ORDER BY counter then flag
+CREATE TABLE t1 (id INT, c counter, f flag);
+# 2. Panic: counter_decode on SELECT
+INSERT INTO t1 VALUES (5, '8686', 'true');
+SELECT id, c  FROM t1 WHERE id = 5;
+ERROR HY000: Invalid value in column 'c' of type 'sdk_coverage.counter' at row 1: check server log for details
+# capture counter decode error
+VillageSQL: Invalid value in column 'c' of type 'sdk_coverage.counter' at row 1 (value: \xEE!\x00\x00\x00\x00\x00\x00): dispatch_vdf
+UPDATE t1 SET c = '5' WHERE id =5;
+# 3. Panic: within counter_compare
+SELECT counter::compare(counter::from_string('68'), counter::from_string('68'));
+ERROR HY000: VDF error in function 'counter::compare': dispatch_vdf
+# 4. Panic: from counter_hash on SELECT
+INSERT INTO t1 VALUES (6, '666', 'true');
+SELECT sum(id), c FROM t1 GROUP BY c ORDER BY c;
+sum(id)	c
+5	5
+6	666
+# get copy of hash error
+DROP TABLE t1;
+# 5. Panic: within counter_panic_default
+CREATE TABLE t_panic (id INT, c counter_panic_default NOT NULL, f flag);
+ERROR HY000: Type 'sdk_coverage.counter_panic_default' failed to initialize: intrinsic_default function failed: dispatch_vdf_intrinsic_default
+# 1. Panic: within padint_encode
+SELECT padint::from_string('86');
+ERROR HY000: error encountered during padint::from_string inference: dispatch_from_string_typed
+CREATE TABLE t2_panic (id INT, p sdk_coverage.padint(4));
+# 2. Panic: padint_decode on SELECT
+INSERT INTO t2_panic VALUES (1, '8686');
+SELECT id, p  FROM t2_panic WHERE id = 1;
+ERROR HY000: Invalid value in column 'p' of type 'sdk_coverage.padint(4)' at row 1: check server log for details
+# capture counter decode error
+VillageSQL: Invalid value in column 'p' of type 'sdk_coverage.padint(4)' at row 1 (value: \xEE!\x00\x00\x00\x00\x00\x00): dispatch_vdf
+DROP TABLE t2_panic;
+# 3. Panic: within padint_compare
+SELECT padint::compare(padint::from_string('68'), padint::from_string('68'));
+ERROR HY000: VDF error in function 'padint::compare': dispatch_vdf
+# 3. Panic: within tvector_compare
+SELECT tvector::compare(
+tvector::from_string('[0,1,2,3,4,5,6,7,8,9,1,2]'),
+tvector::from_string('[9,8,7,6,5,4,3,2,1,0,1,2]'));
+ERROR HY000: VDF error in function 'tvector::compare': dispatch_vdf
+# 4. Panic: within padint_int_to_params
+SELECT padint::int_to_params(17);
+ERROR HY000: VDF error in function 'padint::int_to_params': dispatch_vdf
+# 5. Panic: within padint_resolve_params
+SELECT padint::resolve_params('width=29');
+ERROR HY000: VDF error in function 'padint::resolve_params': dispatch_vdf
+# 6. Panic: during padint_parse
+CREATE TABLE t_panic (id INT, pp sdk_coverage.padint('width=71'));
+ERROR HY000: Type 'sdk_coverage.padint(71)' failed to initialize: from_string VDF failed to encode intrinsic default input '0' (expected persisted_length=8)
+# 7. Panic: within tvector_to_strings
+SELECT tvector::from_string('[0,1,2,3,4,5,6,7,8,9,10]');
+ERROR HY000: error encountered during tvector::from_string inference: dispatch_from_string_typed
+# 8. Panic: during padint_hash
+SELECT padint::hash(padint::from_string('97'));
+ERROR HY000: VDF error in function 'padint::hash': dispatch_vdf
+# 9. Panic: within tvector_default
+CREATE TABLE tv_panic (id INT, tv sdk_coverage.tvector(13) NOT NULL);
+ERROR HY000: Type 'sdk_coverage.tvector(13)' failed to initialize: intrinsic_default function failed: dispatch_intrinsic_default_typed
+UNINSTALL EXTENSION sdk_coverage;

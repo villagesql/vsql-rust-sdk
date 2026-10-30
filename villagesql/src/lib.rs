@@ -87,6 +87,7 @@ use core::ffi::c_void;
 use std::collections::HashMap;
 use std::ffi::c_char;
 use std::marker::PhantomData;
+use std::panic::AssertUnwindSafe;
 use std::sync::{OnceLock, RwLock};
 use villagesql_sys::{
     vef_func_desc_t, vef_postrun_args_t, vef_prerun_args_t, vef_prerun_result_t,
@@ -827,7 +828,17 @@ pub unsafe fn dispatch_vdf(
     result: *mut vef_vdf_result_t,
 ) {
     let in_values = read_in_values(&*args);
-    write_result(f(&in_values), &mut *result);
+
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        write_result(f(&in_values), &mut *result);
+    }));
+
+    match panic_result {
+        Ok(()) => (),
+        Err(_) => {
+            write_result(VdfReturn::Error("dispatch_vdf".to_string()), &mut *result);
+        }
+    }
 }
 
 /// Prerun runner: wrap the raw slots and call the author's setup fn.
@@ -861,7 +872,20 @@ pub unsafe fn dispatch_vdf_with_state<T>(
     let args = &*args;
     let state = borrow_state::<T>(args.user_data);
     let in_values = read_in_values(args);
-    write_result(f(state, &in_values), &mut *result);
+
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        write_result(f(state, &in_values), &mut *result);
+    }));
+
+    match panic_result {
+        Ok(()) => (),
+        Err(_) => {
+            write_result(
+                VdfReturn::Error("dispatch_vdf_with_stat".to_string()),
+                &mut *result,
+            );
+        }
+    }
 }
 
 /// Postrun runner: reclaim the state and drop the state allocated in prerun.
@@ -985,38 +1009,75 @@ pub unsafe fn dispatch_from_string_typed<P>(
     // (count == 0) means it's a bare constant whose params we must infer.
     let input = &result.__bindgen_anon_1.__bindgen_anon_2.type_params;
     let input_known = input.count > 0;
-    let mut maybe = if input_known {
-        let key = canonical_key(TypeParams { raw: input });
-        MaybeParams::present(parse(Params::parse(&key)))
-    } else {
-        MaybeParams::empty()
-    };
+    let mut maybe = MaybeParams::empty();
+    let panic_result1 = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if input_known {
+            let key = canonical_key(TypeParams { raw: input });
+            maybe = MaybeParams::present(parse(Params::parse(&key)));
+        }
+    }));
+
+    match panic_result1 {
+        Ok(()) => (),
+        Err(_) => {
+            write_result(
+                VdfReturn::Error("dispatch_from_string_typed".to_string()),
+                &mut *result,
+            );
+        }
+    }
 
     // Run the author's encoder. When params were unknown, this is where it
     // inspects the string and fills them in via `set`. An `Err` is a bad value,
     // not a failure: a warning gets the server's standard bad-value handling,
     // which strict mode promotes to an error.
-    let ret = match encode(s, &mut maybe) {
-        Ok(bytes) => VdfReturn::Binary(bytes),
-        Err(e) => VdfReturn::warning(e),
-    };
-    write_result(ret, result);
+    if result.type_ != vef_return_value_type_t_VEF_RESULT_ERROR {
+        let panic_result2 = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let ret = match encode(s, &mut maybe) {
+                Ok(bytes) => VdfReturn::Binary(bytes),
+                Err(e) => VdfReturn::warning(e),
+            };
+            write_result(ret, result);
+        }));
+
+        match panic_result2 {
+            Ok(()) => (),
+            Err(_) => {
+                write_result(
+                    VdfReturn::Error("dispatch_from_string_typed".to_string()),
+                    &mut *result,
+                );
+            }
+        }
+    }
 
     // If the author inferred params (and the server gave us a buffer for them),
     // serialize them back so downstream operators see a fully-typed value.
     let succeeded = result.type_ == vef_return_value_type_t_VEF_RESULT_VALUE;
     if succeeded && !input_known && !result.out_type_params.is_null() {
         if let Some(p) = maybe.get() {
-            let pairs = to_strings(p);
-            let out = &mut *result.out_type_params;
-            let buf: &mut [u8] = if out.buf.is_null() || out.max_buf_len == 0 {
-                &mut []
-            } else {
-                std::slice::from_raw_parts_mut(out.buf.cast::<u8>(), out.max_buf_len)
-            };
-            let (needed, overflow) = write_inferred_params(buf, &pairs);
-            out.actual_len = needed;
-            out.overflow = overflow;
+            let panic_result3 = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let pairs = to_strings(p);
+                let out = &mut *result.out_type_params;
+                let buf: &mut [u8] = if out.buf.is_null() || out.max_buf_len == 0 {
+                    &mut []
+                } else {
+                    std::slice::from_raw_parts_mut(out.buf.cast::<u8>(), out.max_buf_len)
+                };
+                let (needed, overflow) = write_inferred_params(buf, &pairs);
+                out.actual_len = needed;
+                out.overflow = overflow;
+            }));
+
+            match panic_result3 {
+                Ok(()) => (),
+                Err(_) => {
+                    write_result(
+                        VdfReturn::Error("dispatch_from_string_typed".to_string()),
+                        &mut *result,
+                    );
+                }
+            }
         }
     }
 }
@@ -1035,17 +1096,29 @@ pub unsafe fn dispatch_intrinsic_default_typed<P>(
 ) {
     let result = &mut *result;
 
-    // The type params ride on the (binary) result slot, as with from_string.
-    let params = {
-        let raw = &result.__bindgen_anon_1.__bindgen_anon_2.type_params;
-        parse(Params::parse(&canonical_key(TypeParams { raw })))
-    };
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // The type params ride on the (binary) result slot, as with from_string.
+        let params = {
+            let raw = &result.__bindgen_anon_1.__bindgen_anon_2.type_params;
+            parse(Params::parse(&canonical_key(TypeParams { raw })))
+        };
 
-    let ret = match default_fn(&params) {
-        Ok(s) => VdfReturn::String(s),
-        Err(e) => VdfReturn::error(e),
-    };
-    write_result(ret, result);
+        let ret = match default_fn(&params) {
+            Ok(s) => VdfReturn::String(s),
+            Err(e) => VdfReturn::error(e),
+        };
+        write_result(ret, result);
+    }));
+
+    match panic_result {
+        Ok(()) => (),
+        Err(_) => {
+            write_result(
+                VdfReturn::Error("dispatch_intrinsic_default_typed".to_string()),
+                &mut *result,
+            );
+        }
+    }
 }
 
 /// Dispatch a non-parameterized type's intrinsic-default VDF. Compute the
@@ -1060,11 +1133,25 @@ pub unsafe fn dispatch_intrinsic_default(
     result: *mut vef_vdf_result_t,
 ) {
     let result = &mut *result;
-    let ret = match default_fn() {
-        Ok(s) => VdfReturn::String(s),
-        Err(e) => VdfReturn::error(e),
-    };
-    write_result(ret, result);
+
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let ret = match default_fn() {
+            Ok(s) => VdfReturn::String(s),
+            Err(e) => VdfReturn::error(e),
+        };
+
+        write_result(ret, result);
+    }));
+
+    match panic_result {
+        Ok(()) => (),
+        Err(_) => {
+            write_result(
+                VdfReturn::Error("dispatch_vdf_intrinsic_default".to_string()),
+                &mut *result,
+            );
+        }
+    }
 }
 
 /// Copy `bytes` into the server's result buffer `buf` (capacity `max`) and mark
@@ -1541,8 +1628,18 @@ macro_rules! func {
                 args: *mut $crate::sys::vef_vdf_args_t,
                 result: *mut $crate::sys::vef_vdf_result_t,
             ) {
-                $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
+                // let panic_result = std::panic::catch_unwind(|| {
+                    $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
+                // });
+
+                // match panic_result {
+                //     Ok(()) => (),
+                //     Err(panic_payload) => {
+                //         write_result(VdfReturn::Error(panic_payload, result));
+                //     }
+                // }
             }
+
             // prerun trampoline
             unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
                 _ctx: *mut $crate::sys::vef_context_t,

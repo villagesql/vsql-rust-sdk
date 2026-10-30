@@ -14,6 +14,7 @@ use villagesql::{InValue, MaybeParams, Params, Resolved, VdfReturn};
 
 fn sdk_identity_int_impl(args: &[InValue]) -> VdfReturn {
     match args.first() {
+        Some(InValue::Int(v)) if *v == 86 => panic!("sdk_identity_int_impl panic"),
         Some(InValue::Int(v)) => VdfReturn::Int(*v),
         Some(InValue::Null) | None => VdfReturn::null(),
         _ => VdfReturn::error("sdk_identity_int: expected INT"),
@@ -45,6 +46,7 @@ fn sdk_warn_if_negative_impl(args: &[InValue]) -> VdfReturn {
 
 pub fn counter_encode(s: &str) -> Result<Vec<u8>, String> {
     let n: i64 = s.trim().parse().map_err(|e| format!("counter: {e}"))?;
+    assert!(n != 86, "counter_encode panic");
     Ok(n.to_le_bytes().to_vec())
 }
 
@@ -52,24 +54,33 @@ pub fn counter_decode(b: &[u8]) -> Result<String, String> {
     if b.len() < 8 {
         return Err(format!("counter: expected 8 bytes, got {}", b.len()));
     }
-    Ok(i64::from_le_bytes(b[..8].try_into().unwrap()).to_string())
+    let n: i64 = i64::from_le_bytes(b[..8].try_into().unwrap());
+    assert!(n != 8686, "counter_decode panic");
+    Ok(n.to_string())
 }
 
 #[must_use]
 pub fn counter_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     let va = i64::from_le_bytes(a[..8].try_into().unwrap());
     let vb = i64::from_le_bytes(b[..8].try_into().unwrap());
+    assert!(va != 68, "counter_compare panic");
     va.cmp(&vb)
 }
 
 #[must_use]
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 pub fn counter_hash(b: &[u8]) -> usize {
+    let va = i64::from_le_bytes(b[..8].try_into().unwrap());
+    assert!(va != 666, "counter_hash panic");
     i64::from_le_bytes(b[..8].try_into().unwrap()) as usize
 }
 
 pub fn counter_default() -> Result<String, String> {
     Ok("0".to_string())
+}
+
+pub fn counter_panic_default() -> Result<String, String> {
+    panic!("counter_panic_default panic");
 }
 
 // ── Type 2: flag (1 byte bool, "true"/"false") ────────────────────────────────
@@ -98,6 +109,8 @@ pub fn flag_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 
 pub fn padint_encode(s: &str, params: &mut MaybeParams<PadintParams>) -> Result<Vec<u8>, String> {
     let n: i64 = s.trim().parse().map_err(|e| format!("padint: {e}"))?;
+    assert!(n != 86, "padint_encode panic");
+
     if !params.is_known() {
         // Bare constant: infer width from the digit count of the literal.
         let digits = s.trim().trim_start_matches('-').len().max(1);
@@ -120,6 +133,7 @@ fn read_i64(b: &[u8]) -> Option<i64> {
 pub fn padint_decode(b: &[u8], p: &PadintParams) -> Result<String, String> {
     let n = read_i64(b).ok_or_else(|| format!("padint: expected 8 bytes, got {}", b.len()))?;
     let width = p.width as usize;
+    assert!(n != 8686, "padint_decode panic");
     Ok(format!("{n:0width$}"))
 }
 
@@ -127,6 +141,7 @@ pub fn padint_decode(b: &[u8], p: &PadintParams) -> Result<String, String> {
 pub fn padint_compare(a: &[u8], b: &[u8], _p: &PadintParams) -> std::cmp::Ordering {
     let va = read_i64(a).unwrap_or(0);
     let vb = read_i64(b).unwrap_or(0);
+    assert!(va != 68, "padint_compare panic");
     va.cmp(&vb)
 }
 
@@ -134,6 +149,7 @@ pub fn padint_int_to_params(n: i64) -> Result<String, String> {
     if n < 1 {
         return Err(format!("padint: width must be >= 1, got {n}"));
     }
+    assert!(n != 17, "padint_int_to_params panic");
     Ok(format!("width={n}"))
 }
 
@@ -143,6 +159,7 @@ pub fn padint_resolve_params(params: Params) -> Result<Resolved, String> {
         .ok_or_else(|| "padint: missing 'width' param".to_string())?
         .parse()
         .map_err(|e| format!("padint: bad width: {e}"))?;
+    assert!(width != 29, "padint_resolve_params panic");
     // Storage is a fixed 8-byte i64. The decode buffer must fit the widest
     // rendering: an i64 is up to 20 characters, and zero-padding can widen it
     // to `width` characters — so take the larger of the two.
@@ -152,6 +169,7 @@ pub fn padint_resolve_params(params: Params) -> Result<Resolved, String> {
 #[must_use]
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 pub fn padint_hash(b: &[u8], _p: &PadintParams) -> usize {
+    assert!(read_i64(b).unwrap_or(0) != 97, "padint_hash panic");
     read_i64(b).unwrap_or(0) as usize
 }
 
@@ -164,6 +182,7 @@ pub fn padint_parse(params: Params) -> PadintParams {
         .get("width")
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
+    assert!(width != 71, "padint_parse panic");
     PadintParams { width }
 }
 
@@ -198,6 +217,7 @@ pub fn tvector_to_strings(p: &TvectorParams) -> Vec<(String, String)> {
     } else {
         "float"
     };
+    assert!(p.dimension != 11, "tvector_to_strings");
     vec![
         ("dimension".to_string(), p.dimension.to_string()),
         ("type".to_string(), ty.to_string()),
@@ -333,6 +353,7 @@ pub fn tvector_decode(bytes: &[u8], params: &TvectorParams) -> Result<String, St
 #[must_use]
 pub fn tvector_compare(a: &[u8], b: &[u8], params: &TvectorParams) -> std::cmp::Ordering {
     let dim = usize::try_from(params.dimension).unwrap_or(0);
+    assert!(dim != 12, "tvector_compare panic");
     let elem_size = params.bytes_per_elem; // bytes per number (4 = float, 8 = double)
     for i in 0..dim {
         let start = i * elem_size;
@@ -348,6 +369,7 @@ pub fn tvector_compare(a: &[u8], b: &[u8], params: &TvectorParams) -> std::cmp::
 
 pub fn tvector_default(p: &TvectorParams) -> Result<String, String> {
     let n = usize::try_from(p.dimension).unwrap_or(0);
+    assert!(n != 13, "tvector_default panic");
     Ok(format!("[{}]", vec!["0"; n].join(",")))
 }
 
@@ -372,6 +394,16 @@ villagesql::extension! {
             compare: counter_compare,
             hash: counter_hash,
             intrinsic_default_fn: counter_default,
+        ),
+        villagesql::custom_type!(
+            type_name: "counter_panic_default",
+            persisted_length: 8,
+            max_decode_buffer_length: 20,
+            encode: counter_encode,
+            decode: counter_decode,
+            compare: counter_compare,
+            hash: counter_hash,
+            intrinsic_default_fn: counter_panic_default,
         ),
         villagesql::custom_type!(
             type_name: "flag",
