@@ -199,7 +199,7 @@ impl SysVarCapability {
     ///
     /// # Returns
     /// - `None` - the capability is unavailable (preview disabled / not requested,
-    ///   or the server's sys_var ABI is older than version 2, which added this
+    ///   or the server's `sys_var` ABI is older than version 2, which added this
     ///   function).
     /// - `Some(false)` - **success** (note the inverted C convention).
     /// - `Some(true)` - the server reported an error.
