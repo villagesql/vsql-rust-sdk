@@ -197,6 +197,13 @@ impl SysVarCapability {
     /// `vsql::sys_var` capability. An INT variable cannot be set from a string,
     /// so use this for INT and [`set`](Self::set) for every other type.
     ///
+    /// # Returns
+    /// - `None` - the capability is unavailable (preview disabled / not requested,
+    ///   or the server's sys_var ABI is older than version 2, which added this
+    ///   function).
+    /// - `Some(false)` - **success** (note the inverted C convention).
+    /// - `Some(true)` - the server reported an error.
+    ///
     /// # Safety
     /// `component_name` and `name` must be valid, NUL-terminated C strings.
     /// `scope` must be null or a valid NUL-terminated C string - all valid for
