@@ -1183,6 +1183,8 @@ unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
         deterministic: d.deterministic,
         clear: d.clear,
         accumulate: d.accumulate,
+        max_result_length: 0,
+        bind_and_check_types: None,
     }))
 }
 
@@ -1233,6 +1235,7 @@ pub unsafe fn build_registration(
             intrinsic_default_vdf_name: t.descriptor.intrinsic_default_vdf_name,
             intrinsic_default_str: t.descriptor.intrinsic_default_str,
             max_persisted_length: t.descriptor.max_persisted_length,
+            variable_length: false,
         })));
     }
     let type_count = u32::try_from(type_ptrs.len()).expect("type count exceeds u32");
@@ -1255,6 +1258,8 @@ pub unsafe fn build_registration(
         types: types_ptr,
         required_capability_count: cap_count,
         required_capabilities: caps_ptr,
+        on_init: None,
+        on_deinit: None,
     }))
 }
 

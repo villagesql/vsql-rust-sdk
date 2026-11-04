@@ -183,7 +183,70 @@ typedef enum : unsigned int {
                    //   vef_register() returns.
                    //   (vef_required_capability_t, required_capabilities,
                    //   required_capability_count in vef_registration_t)
+  VEF_PROTOCOL_4,  // Under development, not stable. Adds:
+                   // + max_result_length on vef_func_desc_t: an extension may
+                   //   declare the maximum length of a STRING or BINARY result
+                   //   so the result column is sized to hold the full value
+                   //   instead of the argument width (fixes materialization
+                   //   truncation).
+                   // + on_init / on_deinit on vef_registration_t: the server
+                   //   calls the extension's load and unload hooks with its
+                   //   capabilities populated, rather than the extension
+                   //   running them itself inside vef_register/vef_unregister.
+                   // + VEF_TYPE_BINARY: a parameter or result of raw bytes.
+                   //   A STRING argument then arrives as utf8mb4 text,
+                   //   converted from the caller's charset; a BINARY argument
+                   //   arrives unconverted, and a BINARY result is labelled
+                   //   binary rather than utf8mb4.
 } vef_protocol_t;
+
+// =============================================================================
+// PRACTICAL LIMITS
+// =============================================================================
+// A field or parameter's type is wide enough to carry any supported value with
+// room to spare; its width is not a promise that the full range is usable. The
+// supported range is the limit documented below. Exceeding a limit has defined
+// behavior -- never undefined behavior:
+//
+// VEF_MAX_RESULT_LENGTH (16 MiB): the largest max_result_length, and the width
+// of a materialized STRING/CUSTOM result column. A larger declared value is
+// capped to it; a produced value wider than the column is truncated when
+// materialized.
+//
+// VEF_MAX_ERROR_LEN (512 bytes): the size of error_msg buffers. A longer
+// message is truncated to fit.
+//
+// VEF_MAX_TYPE_PARAMS_STRING_LEN (1024 bytes): the size of the int_to_params /
+// resolve_params "k=v,..." strings. On overflow the required length is reported
+// via actual_len and the caller retries with a larger buffer.
+//
+// VEF_MAX_TYPE_NAME_LEN (192 bytes): the size of the buffers a
+// bind_and_check_types hook writes a custom type name into via
+// out_arg_types. This is the server's identifier limit -- 64 characters in
+// the utf8mb3 system charset. Follows the same overflow contract.
+//
+// A custom-type column's storage footprint is capped at 65532 bytes. A custom
+// column is backed by a VARBINARY field, and the server's 65535-byte row budget
+// also pays for that field's 2 length bytes and the row's null byte.
+// persisted_length and max_persisted_length are both checked against the cap
+// when the extension is installed: declaring more is rejected with an error
+// naming the type, rather than failing later at CREATE TABLE. Staying under it
+// does not guarantee a column fits -- the other columns draw on the same row
+// budget, which only CREATE TABLE can weigh (ER_TOO_BIG_ROWSIZE).
+//
+// One bound is not a single numeric constant: function arity is limited to 8
+// fixed parameters by the typed C++ builder (kMaxParams) unless varargs
+// (VEF_PARAM_VARARGS) is used.
+// =============================================================================
+
+// TODO(villagesql-windows): consider making the ABI use fixed-width types. For
+// now, we don't think this matters, but it may become an issue for Windows,
+// which has different native lengths, especially if we support Windows+WASM.
+
+// Maximum length of a materialized result column: utf8mb4 characters for a
+// STRING result, bytes for a CUSTOM result. Equals the server's MAX_BLOB_WIDTH.
+// See PRACTICAL LIMITS above.
+#define VEF_MAX_RESULT_LENGTH 16777216
 
 // Max length of error messages in caller-provided buffers.
 #define VEF_MAX_ERROR_LEN 512
@@ -227,10 +290,16 @@ typedef struct {
 
 // Type identifiers for VEF values (parameters and return types)
 typedef enum : int {
+  // Text, always utf8mb4.
   VEF_TYPE_STRING = 0,
   VEF_TYPE_REAL = 1,
   VEF_TYPE_INT = 2,
-  VEF_TYPE_CUSTOM = 3
+  VEF_TYPE_CUSTOM = 3,
+  // protocol >= VEF_PROTOCOL_4
+  // Raw bytes, never converted.
+  VEF_TYPE_BINARY = 4
+
+  // TODO(villagesql-production): Do we want to support DECIMAL?
 } vef_type_id;
 
 // Snapshot of vef_invalue_t as of VEF_PROTOCOL_1. Used as the element type of
@@ -301,7 +370,7 @@ typedef struct {
   bool is_null;
 
   union {
-    // For TYPE_STRING: human-readable text
+    // For TYPE_STRING: human-readable text, in utf8mb4
     struct {
       size_t str_len;
       const char *str_value;
@@ -314,7 +383,16 @@ typedef struct {
 
       // protocol >= VEF_PROTOCOL_3
       // Read-only: the extension must not overwrite these parameters.
+      // TODO(villagesql-beta): Optimize this to pass a token so that the
+      // extension can cache these values in a language-specific way.
       vef_type_params_t type_params;
+    };
+
+    // protocol >= VEF_PROTOCOL_4
+    // For TYPE_BINARY: raw bytes, exactly as the caller supplied them
+    struct {
+      size_t binary_len;
+      const unsigned char *binary_value;
     };
 
     // For TYPE_REAL
@@ -345,8 +423,9 @@ typedef enum : int {
 
 // Result from a VDF call
 //
-// For STRING return type: use str_buf/max_str_len/alt_str_buf
+// For STRING return type: use str_buf/max_str_len/alt_str_buf; write utf8mb4
 // For CUSTOM return type: use bin_buf/max_bin_len/alt_bin_buf
+// For BINARY return type: use binary_buf/max_binary_len/alt_binary_buf
 // For REAL return type: use real_value
 // For INT return type: use int_value
 typedef struct {
@@ -354,8 +433,8 @@ typedef struct {
   vef_return_value_type_t type;
 
   // The actual length of the result (set iff type is IS_VALUE for
-  // STRING/CUSTOM) If type is IS_BUF_TOO_SMALL, this indicates the required
-  // buffer size. For REAL and INT types, this field is unused.
+  // STRING/CUSTOM/BINARY) If type is IS_BUF_TOO_SMALL, this indicates the
+  // required buffer size. For REAL and INT types, this field is unused.
   size_t actual_len;
 
   // Caller-provided buffer for error message (size VEF_MAX_ERROR_LEN).
@@ -401,6 +480,20 @@ typedef struct {
       // protocol >= VEF_PROTOCOL_3
       // Read-only: the extension must not overwrite these parameters.
       vef_type_params_t type_params;
+    };
+
+    // protocol >= VEF_PROTOCOL_4
+    // For BINARY type: caller-provided buffer for raw bytes
+    struct {
+      // Buffer where the result bytes should be written
+      unsigned char *binary_buf;
+
+      // Size of binary_buf in bytes
+      size_t max_binary_len;
+
+      // Callee can return a different pointer than binary_buf. Same semantics
+      // as alt_str_buf above.
+      unsigned char **alt_binary_buf;
     };
 
     // For REAL return type
@@ -508,7 +601,10 @@ typedef void (*vef_vdf_func_t)(vef_context_t *ctx, vef_vdf_args_t *args,
 // function returns.
 //
 // The user_data pointer allows the extension to maintain state across calls.
-// Memory allocated in prerun should be freed in postrun.
+// Memory allocated in prerun should be freed in postrun. If prerun succeeds,
+// postrun is called exactly once, even if the statement fails before the
+// first row. If prerun reports an error, postrun is not called, so prerun
+// must free anything it allocated before reporting the error.
 
 typedef struct {
   // Number of arguments that will be passed to each vdf call
@@ -559,11 +655,134 @@ typedef struct {
 } vef_postrun_args_t;
 
 typedef struct {
-  // Reserved for future use
+  // protocol >= VEF_PROTOCOL_4
+
+  // Result type: IS_VALUE on success, IS_ERROR on failure
+  vef_return_value_type_t type;
+
+  char *error_msg;
 } vef_postrun_result_t;
 
 typedef void (*vef_postrun_func_t)(vef_context_t *ctx, vef_postrun_args_t *args,
                                    vef_postrun_result_t *result);
+
+// =============================================================================
+// Bind-and-check-types Function (vef_bind_types_func_t)
+// =============================================================================
+//
+// protocol >= VEF_PROTOCOL_4
+//
+// Optional hook called once at analysis time (fix_fields), before prerun, when
+// the function is resolved. It lets the extension take full control of type
+// parameter resolution for the call, bypassing the built-in type
+// disambiguation rules.
+//
+// Use it when the parameter relationship between arguments and the return type
+// is something the default rules cannot express, e.g.
+//   vector_concat(vector(M), vector(N)) -> vector(M+N)
+//
+// The hook sees only declared argument types plus any constant argument values
+// (the same view prerun gets); it must not depend on per-row data. It reports
+// the return type's parameters as a canonical "k=v,k=v" string through
+// out_return_params, following the vef_inferred_type_params_t overflow
+// contract.
+
+typedef struct {
+  // Number of arguments to the call.
+  unsigned int arg_count;
+
+  // Declared type of each argument. Array has arg_count elements, each
+  // non-nullptr.
+  const vef_type_t **arg_types;
+
+  // For each argument that is a constant STRING: its text bytes. nullptr for
+  // every other argument, including a constant of a custom type.
+  // In case of parametrized custom type, for which paramters are unknown,
+  // bind_and_check_types can be used to provide parameters for this type,
+  // based on the constant STRING.
+  char **const_values;
+
+  // Length of each constant value. Only valid where const_values[i] != NULL.
+  // Array has arg_count elements.
+  size_t *const_lengths;
+
+  // For each argument: its resolved type parameters, in key/value
+  // form.
+  // In case the corresponding argument doesn't have parameters,
+  // or is a non-custom argument, or is a non-parameterized custom type, or
+  // is a custom type whose parameters are not yet known - then the
+  // corresponding arg_params entry will have its count == 0.
+  // Array has arg_count elements, each non-nullptr.
+  const vef_type_params_t **arg_params;
+} vef_bind_types_args_t;
+
+typedef struct {
+  // Result type: VEF_RESULT_VALUE on success, VEF_RESULT_ERROR to abort the
+  // statement with error_msg.
+  vef_return_value_type_t type;
+
+  // Caller-provided buffer for error message (size VEF_MAX_ERROR_LEN).
+  // Write a null-terminated string here if type == VEF_RESULT_ERROR.
+  char *error_msg;
+
+  // OUTPUT: the return type's parameters as a canonical "k=v,k=v" string.
+  // The caller supplies buf/max_buf_len; the callee writes actual_len (and
+  // sets overflow when the buffer is too small). actual_len == 0 means the
+  // hook says nothing about the return type. Installing a hook disables the
+  // built-in rule, so nothing fills in for it: leave it at 0 only when the
+  // return type has no parameters to decide.
+  vef_inferred_type_params_t *out_return_params;
+
+  // OPTIONAL OUTPUT: per-argument type parameters, one entry per argument,
+  // each following the same contract as out_return_params. The caller
+  // supplies every entry's buf/max_buf_len; the hook writes the canonical
+  // "k=v,k=v" params for any argument it wants to resolve and leaves
+  // actual_len == 0 for the rest.
+  //
+  // This is how a hook resolves an argument the server could not, typically
+  // a string literal written where a parameterized custom type is expected,
+  // which has no sibling to borrow parameters from once a hook switches the
+  // built-in propagation off. Arguments left at 0 keep whatever the server
+  // worked out. nullptr when the server did not supply the array; when
+  // non-nullptr, every one of its arg_count entries is non-nullptr.
+  vef_inferred_type_params_t **out_arg_params;
+
+  // OPTIONAL OUTPUT, varargs only: the custom type an argument should be
+  // read as. buf carries the type name. Same struct and same overflow contract
+  // as out_arg_params, but holding a name rather than "k=v,k=v", sized
+  // VEF_MAX_TYPE_NAME_LEN. actual_len == 0 leaves the server's own inference
+  // for that argument in place.
+  //
+  // A fixed-arity function has no use for this: its signature already says
+  // what each argument must be, so the server supplies this array only for a
+  // varargs call, where there is no signature to say so. A bare '[1,2,3]'
+  // written among a varargs function's arguments is otherwise just a string,
+  // because nothing declares that it should become a custom type.
+  //
+  // What it can do is narrower than the name suggests. An argument that
+  // already carries a type (a column, or a nested VDF's result) is only
+  // *checked* against the declared name, and the call is rejected if they
+  // disagree; the hook cannot reinterpret such an argument. Naming a type is
+  // effective only for an argument the server could not type at all, today a
+  // string constant.
+  // TODO(villagesql-general): revisit that last clause when #400 lands. An
+  // explicitly typed literal will arrive already typed, so it moves into the
+  // checked-only case above; the rule itself still holds.
+  //
+  // Declaring a name here makes out_arg_params[i] the sole source of that
+  // argument's parameters, and the two travel together: parameters written
+  // for an argument whose type is not named here abort the statement, because
+  // a varargs call has no signature the type could come from and the argument
+  // would otherwise stay untyped. The name must be a type registered by this
+  // same extension; anything else aborts the statement. nullptr when the
+  // server did not supply the array; when non-nullptr, every one of its
+  // arg_count entries is non-nullptr.
+  vef_inferred_type_params_t **out_arg_types;
+} vef_bind_types_result_t;
+
+typedef void (*vef_bind_types_func_t)(vef_context_t *ctx,
+                                      vef_bind_types_args_t *args,
+                                      vef_bind_types_result_t *result);
 
 // =============================================================================
 // Aggregate Functions
@@ -634,6 +853,28 @@ typedef struct {
   // It is an error to set exactly one of these; both must be present or absent.
   vef_vdf_clear_func_t clear;
   vef_vdf_accumulate_func_t accumulate;
+
+  // protocol >= VEF_PROTOCOL_4
+  // Declared maximum length of this function's STRING or BINARY result: in
+  // characters for STRING (the result is utf8mb4; for ASCII/JSON output one
+  // character is one byte), in bytes for BINARY.
+  // The server uses it to size the result column so a materialized result
+  // (temp tables for GROUP BY/DISTINCT, CREATE TABLE ... SELECT, UNION) is not
+  // truncated at the argument width. 0 = fall back to the argument width (like
+  // a classic UDF that leaves initid->max_length unset, in which case a large
+  // result truncates when materialized). Not allowed for other return types.
+  // Capped at VEF_MAX_RESULT_LENGTH (see PRACTICAL LIMITS).
+  //
+  // Distinct from buffer_size, which is only the initial row-time output buffer
+  // (it grows on demand); this bounds the column the result is stored into.
+  size_t max_result_length;
+
+  // protocol >= VEF_PROTOCOL_4
+  // OPTIONAL: author-supplied type binding/checking hook. When non-nullptr, the
+  // server calls it at fix_fields time to validate argument type parameters
+  // and compute the return type's parameters, bypassing the built-in
+  // disambiguation rules. See vef_bind_types_func_t.
+  vef_bind_types_func_t bind_and_check_types;
 } vef_func_desc_t;
 
 // =============================================================================
@@ -683,6 +924,19 @@ typedef size_t (*vef_hash_func_t)(const unsigned char *data, size_t len);
 // Maximum length of the serialized "key=value,key=value,..." string used
 // by int_to_params and resolve_params VDFs.
 #define VEF_MAX_TYPE_PARAMS_STRING_LEN 1024
+
+// Maximum length in bytes of a custom type name written back through
+// vef_bind_types_result_t::out_arg_types. A type name is a MySQL identifier,
+// so it is at most 64 characters in the utf8mb3 system charset -- this is the
+// server's NAME_LEN (NAME_CHAR_LEN * SYSTEM_CHARSET_MBMAXLEN), restated here
+// because this header must stand alone for extensions. No terminating NUL is
+// written; actual_len gives the length.
+//
+// Only the server reads this, to size the buffers it hands the hook; an
+// extension sees the capacity at runtime as max_buf_len. Raising it later is
+// therefore not an ABI change -- extensions built against an older SDK keep
+// working and simply get more room.
+#define VEF_MAX_TYPE_NAME_LEN 192
 
 typedef struct {
   // protocol >= VEF_PROTOCOL_1
@@ -737,14 +991,16 @@ typedef struct {
 
   // OPTIONAL: Name of a VDF (from this extension's funcs[]) that produces the
   // intrinsic default binary value for this type. The named VDF must have
-  // signature (INT) -> STRING, where the INT argument is the resolved
-  // persisted_length in bytes (allowing variable-size types to produce the
-  // correct number of bytes). NULL means the type has no intrinsic default.
+  // signature () -> STRING. The server supplies the resolved type
+  // parameters separately (see vef_type_params_t), so a variable-size type
+  // reads its length from there. Mutually exclusive with intrinsic_default_str
+  // (see below). NULL means the type has no intrinsic default.
   const char *intrinsic_default_vdf_name;
 
   // OPTIONAL: A string literal to encode as the intrinsic default value.
   // The server runs the type's encode function on this string to produce the
-  // binary default. Ignored if intrinsic_default_vdf_name is set. NULL means
+  // binary default. Mutually exclusive with intrinsic_default_vdf_name. Setting
+  // both is rejected at registration (INSTALL EXTENSION fails). NULL means
   // no string default is provided; the server falls back to encode("").
   // Only used when protocol >= VEF_PROTOCOL_3.
   const char *intrinsic_default_str;
@@ -764,10 +1020,27 @@ typedef struct {
   // Example: for SVECTOR with max dimension 3072, this is
   //   sizeof(vef_storage_ref_t) + 3072 * sizeof(float).
   int64_t max_persisted_length;
+
+  // protocol >= VEF_PROTOCOL_4
+
+  // Marks the type as variable-length: its persisted size is decided per value
+  // (e.g. a a typed array) rather than being a single fixed
+  // footprint. Set via the builder's variable_length_type(); variable-length
+  // types must also declare max_persisted_length as the upper bound on the
+  // backing field. When true, persisted_length is not a fixed footprint (it is
+  // either left unset or resolved per-instantiation by resolve_params).
+  //
+  // Read only when protocol >= VEF_PROTOCOL_4.
+  bool variable_length;
 } vef_type_desc_t;
 
 // Forward declaration so vef_required_capability_t can reference it.
 typedef struct vef_registration_t vef_registration_t;
+
+// Extension-side hooks the server calls at load and unload. See on_init /
+// on_deinit in vef_registration_t.
+typedef void (*vef_extension_init_func_t)(void);
+typedef void (*vef_extension_deinit_func_t)(void);
 
 // A single capability request in vef_registration_t.required_capabilities.
 // The extension sets name, vtable_dest, vtable_hash, and (if the capability
@@ -838,6 +1111,20 @@ typedef struct vef_registration_t {
   // mismatch, loading the extension fails with an error.
   unsigned int required_capability_count;
   const vef_required_capability_t *required_capabilities;
+
+  // protocol >= VEF_PROTOCOL_4
+
+  // Extension-side load / unload hooks, set from the builder's on_init() and
+  // on_deinit(). The server calls on_init after every required capability has
+  // been populated and on_deinit before depopulating them, so both run with
+  // the extension's capabilities live and its system variables registered.
+  // Neither runs for a registration the server rejects. NULL when the
+  // extension declares no hook. The two are a pair: the server rejects a
+  // registration that sets one without the other.
+  //
+  // Read only when protocol >= VEF_PROTOCOL_4.
+  vef_extension_init_func_t on_init;
+  vef_extension_deinit_func_t on_deinit;
 } vef_registration_t;
 
 // The returned objects can be freed when the registration is passed to the
