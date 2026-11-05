@@ -836,7 +836,10 @@ pub unsafe fn dispatch_vdf(
     match panic_result {
         Ok(()) => (),
         Err(_) => {
-            write_result(VdfReturn::Error("panic!() in dispatch_vdf".to_string()), &mut *result);
+            write_result(
+                VdfReturn::Error("panic!() in dispatch_vdf".to_string()),
+                &mut *result,
+            );
         }
     }
 }
