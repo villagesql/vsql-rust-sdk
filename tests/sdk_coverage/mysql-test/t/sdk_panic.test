@@ -1,0 +1,117 @@
+INSTALL EXTENSION sdk_coverage;
+
+# Custom, non-parameterized types have the following potential user functions
+#  1. encode
+#  2. decode
+#  3. compare
+#  4. hash
+#  5. default
+
+call mtr.add_suppression("VillageSQL.*Invalid value in column.*sdk_coverage");
+call mtr.add_suppression("VillageSQL.*hash VDF.*dispatch_vdf");
+
+--echo # 1. Panic: within counter_encode
+--error 3200
+SELECT counter::from_string('86');
+
+--echo # Two types in one extension: ORDER BY counter then flag
+CREATE TABLE t1 (id INT, c counter, f flag);
+
+--source include/villagesql/decode_failure_log_init.inc
+--echo # 2. Panic: counter_decode on SELECT
+INSERT INTO t1 VALUES (5, '8686', 'true');
+--error 3219
+SELECT id, c  FROM t1 WHERE id = 5;
+
+--echo # capture counter decode error
+--source include/villagesql/decode_failure_log_print.inc
+
+UPDATE t1 SET c = '5' WHERE id =5;
+
+--echo # 3. Panic: within counter_compare
+--error 3200
+SELECT counter::compare(counter::from_string('68'), counter::from_string('68'));
+
+# TODO(villagesql-general): no error reported to client
+--echo # 4. Panic: from counter_hash on SELECT
+INSERT INTO t1 VALUES (6, '666', 'true');
+SELECT sum(id), c FROM t1 GROUP BY c ORDER BY c;
+
+--echo # get copy of hash error
+--source include/villagesql/decode_failure_log_print.inc
+
+DROP TABLE t1;
+
+--echo # 5. Panic: within counter_panic_default
+--error 3219
+CREATE TABLE t_panic (id INT, c counter_panic_default NOT NULL, f flag);
+
+
+# Custom, parameterized types have the following potential user functions
+#  1. encode
+#  2. decode
+#  3. compare
+#  4. int_to_params
+#  5. resolve_params
+#  6. params_parse
+#  7. params_to_strings
+#  8. hash
+#  9. default
+
+--echo # 1. Panic: within padint_encode
+--error 3219
+SELECT padint::from_string('86');
+
+CREATE TABLE t2_panic (id INT, p sdk_coverage.padint(4));
+
+--source include/villagesql/decode_failure_log_init.inc
+--echo # 2. Panic: padint_decode on SELECT
+INSERT INTO t2_panic VALUES (1, '8686');
+--error 3219
+SELECT id, p  FROM t2_panic WHERE id = 1;
+
+--echo # capture counter decode error
+--source include/villagesql/decode_failure_log_print.inc
+DROP TABLE t2_panic;
+
+--echo # 3. Panic: within padint_compare
+--error 3200
+SELECT padint::compare(padint::from_string('68'), padint::from_string('68'));
+
+--echo # 3. Panic: within tvector_compare
+--error 3200
+SELECT tvector::compare(
+   tvector::from_string('[0,1,2,3,4,5,6,7,8,9,1,2]'),
+   tvector::from_string('[9,8,7,6,5,4,3,2,1,0,1,2]'));
+
+--echo # 4. Panic: within padint_int_to_params
+--error 3200
+SELECT padint::int_to_params(17);
+
+--echo # 5. Panic: within padint_resolve_params
+--error 3200
+SELECT padint::resolve_params('width=29');
+
+--echo # 6. Panic: during padint_parse
+--error 3219
+CREATE TABLE t_panic (id INT, pp sdk_coverage.padint('width=71'));
+
+--echo # 7. Panic: within tvector_to_strings
+--error 3219
+SELECT tvector::from_string('[0,1,2,3,4,5,6,7,8,9,10]');
+
+--echo # 8. Panic: during padint_hash
+--error 3200
+SELECT padint::hash(padint::from_string('97'));
+
+--echo # 9. Panic: within tvector_default
+--error 3219
+CREATE TABLE tv_panic (id INT, tv sdk_coverage.tvector(13) NOT NULL);
+
+## Later, for functions
+#--echo # InValue::Int dispatch panic
+#--error 3200
+#SELECT sdk_identity_int(86);
+
+--remove_file $MYSQLTEST_VARDIR/tmp/decode_fail_log_pos.txt
+UNINSTALL EXTENSION sdk_coverage;
