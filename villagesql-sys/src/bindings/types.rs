@@ -483,21 +483,24 @@ pub type vef_vdf_func_t = ::std::option::Option<
 pub struct vef_prerun_args_t {
     pub arg_count: ::std::os::raw::c_uint,
     pub arg_types: *mut vef_type_t,
-    pub const_values: *mut *mut ::std::os::raw::c_char,
-    pub const_lengths: *mut usize,
+    pub deprecated_const_values: *mut *mut ::std::os::raw::c_char,
+    pub deprecated_const_lengths: *mut usize,
+    pub const_args: *mut *const vef_invalue_t,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of vef_prerun_args_t"][::std::mem::size_of::<vef_prerun_args_t>() - 32usize];
+    ["Size of vef_prerun_args_t"][::std::mem::size_of::<vef_prerun_args_t>() - 40usize];
     ["Alignment of vef_prerun_args_t"][::std::mem::align_of::<vef_prerun_args_t>() - 8usize];
     ["Offset of field: vef_prerun_args_t::arg_count"]
         [::std::mem::offset_of!(vef_prerun_args_t, arg_count) - 0usize];
     ["Offset of field: vef_prerun_args_t::arg_types"]
         [::std::mem::offset_of!(vef_prerun_args_t, arg_types) - 8usize];
-    ["Offset of field: vef_prerun_args_t::const_values"]
-        [::std::mem::offset_of!(vef_prerun_args_t, const_values) - 16usize];
-    ["Offset of field: vef_prerun_args_t::const_lengths"]
-        [::std::mem::offset_of!(vef_prerun_args_t, const_lengths) - 24usize];
+    ["Offset of field: vef_prerun_args_t::deprecated_const_values"]
+        [::std::mem::offset_of!(vef_prerun_args_t, deprecated_const_values) - 16usize];
+    ["Offset of field: vef_prerun_args_t::deprecated_const_lengths"]
+        [::std::mem::offset_of!(vef_prerun_args_t, deprecated_const_lengths) - 24usize];
+    ["Offset of field: vef_prerun_args_t::const_args"]
+        [::std::mem::offset_of!(vef_prerun_args_t, const_args) - 32usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
