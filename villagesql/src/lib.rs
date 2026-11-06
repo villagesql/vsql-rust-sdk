@@ -87,7 +87,8 @@ use core::ffi::c_void;
 use std::collections::HashMap;
 use std::ffi::c_char;
 use std::marker::PhantomData;
-use std::sync::{OnceLock, RwLock};
+use std::panic::AssertUnwindSafe;
+use std::sync::{OnceLock, PoisonError, RwLock};
 use villagesql_sys::{
     vef_func_desc_t, vef_postrun_args_t, vef_prerun_args_t, vef_prerun_result_t,
     vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t, vef_required_capability_t,
@@ -412,26 +413,26 @@ impl<P: Send + Sync + 'static> TypeParamsCache<P> {
     }
 
     /// Typed params for `raw`, parsing + caching on first sight.
-    ///
-    /// # Panics
-    /// Panics if the cache lock is poisoned (a thread panicked while holding it).
     pub fn get(&self, raw: TypeParams, parse: fn(Params) -> P) -> &'static P {
         let key = canonical_key(raw);
 
         // Fast path: shared read lock; most calls hit an existing entry.
-        if let Some(&p) = self.map().read().unwrap().get(&key) {
+        if let Some(&p) = self
+            .map()
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
             return p;
         }
 
-        // Miss: exclusive write lock, re-check (another thread may have been
-        // in a race), then parse once and insert.
-        let mut map = self.map().write().unwrap();
-        if let Some(&p) = map.get(&key) {
-            return p;
-        }
-        let parsed: &'static P = Box::leak(Box::new(parse(Params::parse(&key))));
-        map.insert(key, parsed);
-        parsed
+        // Miss: run the author's parse with NO lock held, so a panic in it
+        // can't poison the cache. If another thread inserted the same key
+        // meanwhile, keep theirs and drop ours (parse is pure, so they match).
+        let parsed = parse(Params::parse(&key));
+        let mut map = self.map().write().unwrap_or_else(PoisonError::into_inner);
+        map.entry(key)
+            .or_insert_with(|| Box::leak(Box::new(parsed)))
     }
 }
 
@@ -827,7 +828,20 @@ pub unsafe fn dispatch_vdf(
     result: *mut vef_vdf_result_t,
 ) {
     let in_values = read_in_values(&*args);
-    write_result(f(&in_values), &mut *result);
+
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        write_result(f(&in_values), &mut *result);
+    }));
+
+    match panic_result {
+        Ok(()) => (),
+        Err(_) => {
+            write_result(
+                VdfReturn::Error("panic!() in dispatch_vdf".to_string()),
+                &mut *result,
+            );
+        }
+    }
 }
 
 /// Prerun runner: wrap the raw slots and call the author's setup fn.
@@ -985,38 +999,75 @@ pub unsafe fn dispatch_from_string_typed<P>(
     // (count == 0) means it's a bare constant whose params we must infer.
     let input = &result.__bindgen_anon_1.__bindgen_anon_2.type_params;
     let input_known = input.count > 0;
-    let mut maybe = if input_known {
-        let key = canonical_key(TypeParams { raw: input });
-        MaybeParams::present(parse(Params::parse(&key)))
-    } else {
-        MaybeParams::empty()
-    };
+    let mut maybe = MaybeParams::empty();
+    let panic_result1 = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if input_known {
+            let key = canonical_key(TypeParams { raw: input });
+            maybe = MaybeParams::present(parse(Params::parse(&key)));
+        }
+    }));
+
+    match panic_result1 {
+        Ok(()) => (),
+        Err(_) => {
+            write_result(
+                VdfReturn::Error("panic!() in dispatch_from_string_typed_1".to_string()),
+                &mut *result,
+            );
+        }
+    }
 
     // Run the author's encoder. When params were unknown, this is where it
     // inspects the string and fills them in via `set`. An `Err` is a bad value,
     // not a failure: a warning gets the server's standard bad-value handling,
     // which strict mode promotes to an error.
-    let ret = match encode(s, &mut maybe) {
-        Ok(bytes) => VdfReturn::Binary(bytes),
-        Err(e) => VdfReturn::warning(e),
-    };
-    write_result(ret, result);
+    if result.type_ != vef_return_value_type_t_VEF_RESULT_ERROR {
+        let panic_result2 = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let ret = match encode(s, &mut maybe) {
+                Ok(bytes) => VdfReturn::Binary(bytes),
+                Err(e) => VdfReturn::warning(e),
+            };
+            write_result(ret, result);
+        }));
+
+        match panic_result2 {
+            Ok(()) => (),
+            Err(_) => {
+                write_result(
+                    VdfReturn::Error("panic!() in dispatch_from_string_typed_2".to_string()),
+                    &mut *result,
+                );
+            }
+        }
+    }
 
     // If the author inferred params (and the server gave us a buffer for them),
     // serialize them back so downstream operators see a fully-typed value.
     let succeeded = result.type_ == vef_return_value_type_t_VEF_RESULT_VALUE;
     if succeeded && !input_known && !result.out_type_params.is_null() {
         if let Some(p) = maybe.get() {
-            let pairs = to_strings(p);
-            let out = &mut *result.out_type_params;
-            let buf: &mut [u8] = if out.buf.is_null() || out.max_buf_len == 0 {
-                &mut []
-            } else {
-                std::slice::from_raw_parts_mut(out.buf.cast::<u8>(), out.max_buf_len)
-            };
-            let (needed, overflow) = write_inferred_params(buf, &pairs);
-            out.actual_len = needed;
-            out.overflow = overflow;
+            let panic_result3 = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let pairs = to_strings(p);
+                let out = &mut *result.out_type_params;
+                let buf: &mut [u8] = if out.buf.is_null() || out.max_buf_len == 0 {
+                    &mut []
+                } else {
+                    std::slice::from_raw_parts_mut(out.buf.cast::<u8>(), out.max_buf_len)
+                };
+                let (needed, overflow) = write_inferred_params(buf, &pairs);
+                out.actual_len = needed;
+                out.overflow = overflow;
+            }));
+
+            match panic_result3 {
+                Ok(()) => (),
+                Err(_) => {
+                    write_result(
+                        VdfReturn::Error("panic!() in dispatch_from_string_typed_3".to_string()),
+                        &mut *result,
+                    );
+                }
+            }
         }
     }
 }
@@ -1035,17 +1086,29 @@ pub unsafe fn dispatch_intrinsic_default_typed<P>(
 ) {
     let result = &mut *result;
 
-    // The type params ride on the (binary) result slot, as with from_string.
-    let params = {
-        let raw = &result.__bindgen_anon_1.__bindgen_anon_2.type_params;
-        parse(Params::parse(&canonical_key(TypeParams { raw })))
-    };
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // The type params ride on the (binary) result slot, as with from_string.
+        let params = {
+            let raw = &result.__bindgen_anon_1.__bindgen_anon_2.type_params;
+            parse(Params::parse(&canonical_key(TypeParams { raw })))
+        };
 
-    let ret = match default_fn(&params) {
-        Ok(s) => VdfReturn::String(s),
-        Err(e) => VdfReturn::error(e),
-    };
-    write_result(ret, result);
+        let ret = match default_fn(&params) {
+            Ok(s) => VdfReturn::String(s),
+            Err(e) => VdfReturn::error(e),
+        };
+        write_result(ret, result);
+    }));
+
+    match panic_result {
+        Ok(()) => (),
+        Err(_) => {
+            write_result(
+                VdfReturn::Error("panic!() in dispatch_intrinsic_default_typed".to_string()),
+                &mut *result,
+            );
+        }
+    }
 }
 
 /// Dispatch a non-parameterized type's intrinsic-default VDF. Compute the
@@ -1060,11 +1123,25 @@ pub unsafe fn dispatch_intrinsic_default(
     result: *mut vef_vdf_result_t,
 ) {
     let result = &mut *result;
-    let ret = match default_fn() {
-        Ok(s) => VdfReturn::String(s),
-        Err(e) => VdfReturn::error(e),
-    };
-    write_result(ret, result);
+
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let ret = match default_fn() {
+            Ok(s) => VdfReturn::String(s),
+            Err(e) => VdfReturn::error(e),
+        };
+
+        write_result(ret, result);
+    }));
+
+    match panic_result {
+        Ok(()) => (),
+        Err(_) => {
+            write_result(
+                VdfReturn::Error("panic!() in dispatch_vdf_intrinsic_default".to_string()),
+                &mut *result,
+            );
+        }
+    }
 }
 
 /// Copy `bytes` into the server's result buffer `buf` (capacity `max`) and mark
@@ -1546,7 +1623,16 @@ macro_rules! func {
                 args: *mut $crate::sys::vef_vdf_args_t,
                 result: *mut $crate::sys::vef_vdf_result_t,
             ) {
-                $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
+                // let panic_result = std::panic::catch_unwind(|| {
+                    $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
+                // });
+
+                // match panic_result {
+                //     Ok(()) => (),
+                //     Err(panic_payload) => {
+                //         write_result(VdfReturn::Error(panic_payload, result));
+                //     }
+                // }
             }
             // prerun trampoline
             unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
@@ -2930,6 +3016,29 @@ macro_rules! parameterized_type {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_panic_does_not_poison_params_cache() {
+        fn parse_ok(_: Params) -> u32 {
+            4
+        }
+        fn parse_panics(_: Params) -> u32 {
+            panic!("author parse panicked")
+        }
+
+        static CACHE: TypeParamsCache<u32> = TypeParamsCache::new();
+        // SAFETY: vef_type_params_t is a plain C struct; all-zero = no params.
+        let raw: vef_type_params_t = unsafe { std::mem::zeroed() };
+
+        // A panicking parse propagates (dispatch's catch_unwind handles it)
+        let first = std::panic::catch_unwind(|| *CACHE.get(TypeParams { raw: &raw }, parse_panics));
+        assert!(first.is_err());
+
+        // Must not poison the cache: the next lookup still works.
+        let second = std::panic::catch_unwind(|| *CACHE.get(TypeParams { raw: &raw }, parse_ok));
+        assert_eq!(second.ok(), Some(4));
+        assert!(!CACHE.map().is_poisoned());
+    }
 
     // -- Params::parse: turns "k=v,k=v" into looked-up pairs ---
 
