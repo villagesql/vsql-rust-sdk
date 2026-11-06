@@ -1,0 +1,157 @@
+INSTALL EXTENSION sdk_coverage;
+CREATE TABLE v2 (id INT PRIMARY KEY, v tvector(2));
+CREATE TABLE v3 (id INT PRIMARY KEY, v tvector(3));
+INSERT INTO v2 VALUES (1, '[1,2]');
+INSERT INTO v3 VALUES (1, '[3,4,5]');
+#
+# 1. set_return: two columns of different dimensions give tvector(M+N).
+#
+SELECT tvector_concat(a.v, b.v) AS c FROM v2 a, v3 b;
+c
+[1,2,3,4,5]
+SELECT tvector_concat(b.v, a.v) AS c FROM v2 a, v3 b;
+c
+[3,4,5,1,2]
+# Same dimension on both sides still concatenates rather than copying.
+SELECT tvector_concat(a.v, b.v) AS c FROM v2 a, v2 b;
+c
+[1,2,1,2]
+# The result really is tvector(5): it stores into a tvector(5) column.
+CREATE TABLE v5 (v tvector(5));
+INSERT INTO v5 SELECT tvector_concat(a.v, b.v) FROM v2 a, v3 b;
+SELECT v FROM v5;
+v
+[1,2,3,4,5]
+#
+# 2. set_arg: a literal gets its params from the hook, on either side.
+#
+SELECT tvector_concat('[7,8]', v) AS c FROM v3;
+c
+[7,8,3,4,5]
+SELECT tvector_concat(v, '[7]') AS c FROM v3;
+c
+[3,4,5,7]
+SELECT tvector_concat('[1,2]', '[3,4,5]') AS c;
+c
+[1,2,3,4,5]
+#
+# 3. error(): rejected at resolution time, before any row is read.
+#
+SELECT tvector_concat('[]', '[1,2]') AS c;
+ERROR HY000: Cannot initialize function 'tvector_concat': tvector_concat: argument 1 is empty; a tvector must have at least one element
+SELECT tvector_concat('not a vector', '[1]') AS c;
+ERROR HY000: Cannot initialize function 'tvector_concat': tvector_concat: argument 1 is not a vector literal
+CREATE TABLE texts (t VARCHAR(32));
+INSERT INTO texts VALUES ('[1,2]');
+# A non-constant string has no value the hook can count.
+SELECT tvector_concat(t, '[1]') FROM texts;
+ERROR HY000: Cannot initialize function 'tvector_concat': tvector_concat: argument 1 must be a tvector or a constant vector literal
+#
+# 4. params::<P>(): the element type comes from the resolved side, and two
+#    resolved sides must agree.
+#
+CREATE TABLE d3 (id INT PRIMARY KEY, v tvector('dimension=3,type=double'));
+INSERT INTO d3 VALUES (1, '[1.5,2.5,3.5]');
+SELECT tvector_concat(v, '[4.5]') AS c FROM d3;
+c
+[1.5,2.5,3.5,4.5]
+SELECT tvector_concat(a.v, b.v) FROM d3 a, v3 b;
+ERROR HY000: Cannot initialize function 'tvector_concat': tvector_concat: vectors must have the same element type
+#
+# 5. The combined dimension is bounded by the type's maximum. The vectors
+#    are built with CONCAT, a constant expression. A fixed-arity custom-type
+#    parameter takes only a plain literal, so the server rejects it before
+#    the hook runs; a varargs call passes it to the hook as a constant.
+#
+SELECT JSON_LENGTH(tvector_concat(CONCAT('[', REPEAT('1,', 2047), '1]'), '[2]')) AS dims;
+ERROR HY000: Cannot initialize function 'tvector_concat': argument 1 must be a custom type or string constant
+SELECT tvector_concat_all(CONCAT('[', REPEAT('1,', 2047), '1]'),
+CONCAT('[', REPEAT('1,', 2047), '1]'), '[1]');
+ERROR HY000: Cannot initialize function 'tvector_concat_all': tvector_concat_all: combined dimension 4097 exceeds the maximum of 4096
+#
+# 6. NULL propagates from the row function.
+#
+INSERT INTO v3 VALUES (2, NULL);
+SELECT id, tvector_concat(v, '[7]') IS NULL AS is_null FROM v3 ORDER BY id;
+id	is_null
+1	0
+2	1
+#
+# 7. Varargs: set_arg_with_type names a literal's type.
+#
+SELECT tvector_concat_all('[1]', '[2,3]', '[4,5,6]') AS c;
+c
+[1,2,3,4,5,6]
+SELECT tvector_concat_all(a.v, '[9]', b.v) AS c FROM v2 a, v3 b WHERE b.id = 1;
+c
+[1,2,9,3,4,5]
+SELECT tvector_concat_all('[1,2]') AS c;
+c
+[1,2]
+SELECT tvector_concat_all();
+ERROR HY000: Cannot initialize function 'tvector_concat_all': tvector_concat_all: requires at least one argument
+SELECT tvector_concat_all('[1]', 5);
+ERROR HY000: Cannot initialize function 'tvector_concat_all': tvector_concat_all: argument 2 must be a tvector or a constant vector literal
+#
+# 8. The TYPEID('user') pattern: the result's params come from a constant
+#    string. The probes below record how such a result behaves, which is
+#    what returning a custom type instead of text would mean for TYPEID.
+#
+SELECT padint_with_width('5', 42) AS p;
+p
+00042
+CREATE TABLE p5 (p padint(5));
+INSERT INTO p5 VALUES (padint_with_width('5', 7));
+SELECT p FROM p5;
+p
+00007
+# Into a column with a different width.
+INSERT INTO p5 VALUES (padint_with_width('3', 8));
+ERROR HY000: Cannot implicitly cast from sdk_coverage.padint(3) to sdk_coverage.padint(5) for column 'p' at row 1
+# Used as text.
+SELECT padint_with_width('5', 42) REGEXP '^0+42$' AS regexp_match;
+ERROR HY000: Incorrect usage of regexp_like and padint
+SELECT LENGTH(padint_with_width('5', 42)) AS len;
+ERROR HY000: Incorrect usage of length and padint
+SELECT CONCAT('n=', padint_with_width('5', 42)) AS concatenated;
+ERROR HY000: Incorrect usage of concat and padint
+# Stored into a VARCHAR column.
+CREATE TABLE vc (s VARCHAR(20));
+INSERT INTO vc VALUES (padint_with_width('5', 42));
+SELECT HEX(s) AS stored_hex FROM vc;
+stored_hex
+2A00000000000000
+# A NULL width, a non-constant width, and a prepared-statement parameter
+# as the width are rejected when the statement is resolved.
+SELECT padint_with_width(NULL, 42) AS p;
+ERROR HY000: Cannot initialize function 'padint_with_width': padint_with_width: the width must be a constant string
+CREATE TABLE widths (w VARCHAR(4));
+INSERT INTO widths VALUES ('5');
+SELECT padint_with_width(w, 42) AS p FROM widths;
+ERROR HY000: Cannot initialize function 'padint_with_width': padint_with_width: the width must be a constant string
+PREPARE s FROM 'SELECT padint_with_width(?, 42) AS p';
+ERROR HY000: Cannot initialize function 'padint_with_width': padint_with_width: the width must be a constant string
+# A constant width with a prepared-statement parameter as the value: the
+# hook runs once at PREPARE, and each EXECUTE uses the bound value.
+PREPARE s FROM 'SELECT padint_with_width(''5'', ?) AS p';
+SET @n = 7;
+EXECUTE s USING @n;
+p
+00007
+SET @n = 42;
+EXECUTE s USING @n;
+p
+00042
+DEALLOCATE PREPARE s;
+#
+# Cleanup
+#
+DROP TABLE widths;
+DROP TABLE vc;
+DROP TABLE p5;
+DROP TABLE d3;
+DROP TABLE texts;
+DROP TABLE v5;
+DROP TABLE v3;
+DROP TABLE v2;
+UNINSTALL EXTENSION sdk_coverage;
