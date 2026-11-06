@@ -88,7 +88,7 @@ use std::collections::HashMap;
 use std::ffi::c_char;
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{OnceLock, PoisonError, RwLock};
 use villagesql_sys::{
     vef_func_desc_t, vef_postrun_args_t, vef_prerun_args_t, vef_prerun_result_t,
     vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t, vef_required_capability_t,
@@ -413,26 +413,26 @@ impl<P: Send + Sync + 'static> TypeParamsCache<P> {
     }
 
     /// Typed params for `raw`, parsing + caching on first sight.
-    ///
-    /// # Panics
-    /// Panics if the cache lock is poisoned (a thread panicked while holding it).
     pub fn get(&self, raw: TypeParams, parse: fn(Params) -> P) -> &'static P {
         let key = canonical_key(raw);
 
         // Fast path: shared read lock; most calls hit an existing entry.
-        if let Some(&p) = self.map().read().unwrap().get(&key) {
+        if let Some(&p) = self
+            .map()
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
             return p;
         }
 
-        // Miss: exclusive write lock, re-check (another thread may have been
-        // in a race), then parse once and insert.
-        let mut map = self.map().write().unwrap();
-        if let Some(&p) = map.get(&key) {
-            return p;
-        }
-        let parsed: &'static P = Box::leak(Box::new(parse(Params::parse(&key))));
-        map.insert(key, parsed);
-        parsed
+        // Miss: run the author's parse with NO lock held, so a panic in it
+        // can't poison the cache. If another thread inserted the same key
+        // meanwhile, keep theirs and drop ours (parse is pure, so they match).
+        let parsed = parse(Params::parse(&key));
+        let mut map = self.map().write().unwrap_or_else(PoisonError::into_inner);
+        map.entry(key)
+            .or_insert_with(|| Box::leak(Box::new(parsed)))
     }
 }
 
@@ -3007,6 +3007,29 @@ macro_rules! parameterized_type {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_panic_does_not_poison_params_cache() {
+        fn parse_ok(_: Params) -> u32 {
+            4
+        }
+        fn parse_panics(_: Params) -> u32 {
+            panic!("author parse panicked")
+        }
+
+        static CACHE: TypeParamsCache<u32> = TypeParamsCache::new();
+        // SAFETY: vef_type_params_t is a plain C struct; all-zero = no params.
+        let raw: vef_type_params_t = unsafe { std::mem::zeroed() };
+
+        // A panicking parse propagates (dispatch's catch_unwind handles it)
+        let first = std::panic::catch_unwind(|| *CACHE.get(TypeParams { raw: &raw }, parse_panics));
+        assert!(first.is_err());
+
+        // Must not poison the cache: the next lookup still works.
+        let second = std::panic::catch_unwind(|| *CACHE.get(TypeParams { raw: &raw }, parse_ok));
+        assert_eq!(second.ok(), Some(4));
+        assert!(!CACHE.map().is_poisoned());
+    }
 
     // -- Params::parse: turns "k=v,k=v" into looked-up pairs ---
 
