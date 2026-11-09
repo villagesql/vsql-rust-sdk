@@ -24,4 +24,22 @@ INSERT INTO t1 VALUES ('Hello'), ('World'), (NULL), ('rot13 test 123');
 SELECT rot13(s) FROM t1 ORDER BY s;
 DROP TABLE t1;
 
+--echo # Bytes that aren't valid UTF-8 fail the statement instead of crashing the server
+--error ER_UDF_ERROR
+SELECT rot13(_binary 0xff);
+CREATE TABLE t2 (s VARCHAR(10) CHARACTER SET latin1);
+INSERT INTO t2 VALUES (_latin1 0x636166E9);
+--error ER_UDF_ERROR
+SELECT rot13(s) FROM t2;
+
+--echo # Converting to utf8mb4 first makes the same value work
+SELECT rot13(CONVERT(s USING utf8mb4)) FROM t2;
+DROP TABLE t2;
+
+--echo # Valid multi-byte UTF-8 still passes through
+SELECT rot13('café ✓ 日本');
+
+--echo # The server is still up
+SELECT 1;
+
 UNINSTALL EXTENSION vsql_rot13;

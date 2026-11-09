@@ -33,4 +33,24 @@ Uryyb
 ebg13 grfg 123
 Jbeyq
 DROP TABLE t1;
+# Bytes that aren't valid UTF-8 fail the statement instead of crashing the server
+SELECT rot13(_binary 0xff);
+ERROR HY000: VDF error in function 'rot13': argument 1 is not valid UTF-8 (invalid byte at offset 0); convert it with CONVERT(... USING utf8mb4)
+CREATE TABLE t2 (s VARCHAR(10) CHARACTER SET latin1);
+INSERT INTO t2 VALUES (_latin1 0x636166E9);
+SELECT rot13(s) FROM t2;
+ERROR HY000: VDF error in function 'rot13': argument 1 is not valid UTF-8 (invalid byte at offset 3); convert it with CONVERT(... USING utf8mb4)
+# Converting to utf8mb4 first makes the same value work
+SELECT rot13(CONVERT(s USING utf8mb4)) FROM t2;
+rot13(CONVERT(s USING utf8mb4))
+pnsé
+DROP TABLE t2;
+# Valid multi-byte UTF-8 still passes through
+SELECT rot13('café ✓ 日本');
+rot13('café ✓ 日本')
+pnsé ✓ 日本
+# The server is still up
+SELECT 1;
+1
+1
 UNINSTALL EXTENSION vsql_rot13;

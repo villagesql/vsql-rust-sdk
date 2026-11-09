@@ -216,13 +216,15 @@ impl<'a> TypeParams<'a> {
         self.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
     }
 
-    /// Walk through every `(key, value)` pair.
+    /// Walk through every `(key, value)` pair. A pair that isn't valid UTF-8 is
+    /// skipped, so [`TypeParams::get`] doesn't find it. The server stores
+    /// parameters as UTF-8, so this doesn't happen in practice.
     pub fn iter(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
         let (keys, values) = (self.raw.keys, self.raw.values);
-        (0..self.len()).map(move |i| unsafe {
+        (0..self.len()).filter_map(move |i| unsafe {
             // SAFETY: for every index below `count`, the server guarantees
-            // keys[i]/values[i] point to valid, NUL-terminated UTF-8 strings.
-            (cstr_to_str(*keys.add(i)), cstr_to_str(*values.add(i)))
+            // keys[i]/values[i] point to valid, NUL-terminated strings.
+            Some((cstr_to_str(*keys.add(i))?, cstr_to_str(*values.add(i))?))
         })
     }
 }
@@ -703,12 +705,13 @@ impl ArgType<'_> {
         self.inner.id == villagesql_sys::vef_type_id_VEF_TYPE_CUSTOM
     }
 
-    /// The custom type's name, or `None` if this isn't a custom type.
+    /// The custom type's name, or `None` if this isn't a custom type (or, which
+    /// doesn't happen in practice, if the name isn't valid UTF-8).
     #[must_use]
     pub fn custom_name(&self) -> Option<&str> {
         if self.is_custom() && !self.inner.custom_type.is_null() {
-            // SAFETY: server guarantees a valid NUL-terminated UTF-8 name for custom types.
-            Some(unsafe { cstr_to_str(self.inner.custom_type) })
+            // SAFETY: server guarantees a valid NUL-terminated name for custom types.
+            unsafe { cstr_to_str(self.inner.custom_type) }
         } else {
             None
         }
@@ -777,14 +780,19 @@ unsafe fn reclaim_state<T>(raw: *mut c_void) {
 
 /// Helper to convert raw Protocol-3 VDF arguments into a `&[InValue]` slice.
 ///
+/// The server passes a STRING argument's bytes in its own character set, without
+/// converting them. A `&str` must be UTF-8, so bytes that aren't valid UTF-8 fail
+/// here with an error message rather than reaching the author's function. Bytes
+/// from another character set that happen to be valid UTF-8 pass through as-is.
+///
 /// # Safety
 /// `args` and `result` must be valid for the duration of the call.
-unsafe fn read_in_values(args: &vef_vdf_args_t) -> Vec<InValue<'_>> {
+unsafe fn read_in_values(args: &vef_vdf_args_t) -> Result<Vec<InValue<'_>>, String> {
     let value_count = args.value_count as usize;
     let raw_vals = std::slice::from_raw_parts(args.__bindgen_anon_1.values, value_count);
 
     let mut in_values: Vec<InValue> = Vec::with_capacity(value_count);
-    for &ptr in raw_vals {
+    for (i, &ptr) in raw_vals.iter().enumerate() {
         let v = &*ptr;
         if v.is_null {
             in_values.push(InValue::Null);
@@ -794,7 +802,7 @@ unsafe fn read_in_values(args: &vef_vdf_args_t) -> Vec<InValue<'_>> {
             t if t == vef_type_id_VEF_TYPE_STRING => {
                 let anon = &v.__bindgen_anon_1.__bindgen_anon_1;
                 let bytes = std::slice::from_raw_parts(anon.str_value.cast::<u8>(), anon.str_len);
-                InValue::String(std::str::from_utf8_unchecked(bytes))
+                InValue::String(str_arg(i, bytes)?)
             }
             t if t == vef_type_id_VEF_TYPE_REAL => InValue::Real(v.__bindgen_anon_1.real_value),
             t if t == vef_type_id_VEF_TYPE_INT => InValue::Int(v.__bindgen_anon_1.int_value),
@@ -814,7 +822,20 @@ unsafe fn read_in_values(args: &vef_vdf_args_t) -> Vec<InValue<'_>> {
         };
         in_values.push(iv);
     }
-    in_values
+    Ok(in_values)
+}
+
+/// Borrow STRING argument `i` (zero-based) as a `&str`, or explain why it isn't
+/// valid UTF-8.
+fn str_arg(i: usize, bytes: &[u8]) -> Result<&str, String> {
+    std::str::from_utf8(bytes).map_err(|e| {
+        format!(
+            "argument {} is not valid UTF-8 (invalid byte at offset {}); \
+             convert it with CONVERT(... USING utf8mb4)",
+            i + 1,
+            e.valid_up_to()
+        )
+    })
 }
 
 /// Convert raw Protocol-3 VDF arguments into a `&[InValue]` slice and call `f`.
@@ -826,8 +847,11 @@ pub unsafe fn dispatch_vdf(
     args: *mut vef_vdf_args_t,
     result: *mut vef_vdf_result_t,
 ) {
-    let in_values = read_in_values(&*args);
-    write_result(f(&in_values), &mut *result);
+    let ret = match read_in_values(&*args) {
+        Ok(in_values) => f(&in_values),
+        Err(msg) => VdfReturn::Error(msg),
+    };
+    write_result(ret, &mut *result);
 }
 
 /// Prerun runner: wrap the raw slots and call the author's setup fn.
@@ -860,8 +884,11 @@ pub unsafe fn dispatch_vdf_with_state<T>(
 ) {
     let args = &*args;
     let state = borrow_state::<T>(args.user_data);
-    let in_values = read_in_values(args);
-    write_result(f(state, &in_values), &mut *result);
+    let ret = match read_in_values(args) {
+        Ok(in_values) => f(state, &in_values),
+        Err(msg) => VdfReturn::Error(msg),
+    };
+    write_result(ret, &mut *result);
 }
 
 /// Postrun runner: reclaim the state and drop the state allocated in prerun.
@@ -906,15 +933,23 @@ pub unsafe fn dispatch_clear<T>(f: fn(&mut T), args: *mut vef_vdf_args_t) {
     f(state);
 }
 
-/// Aggregate accumulate: fold one row into the accumulator. Returns nothing.
+/// Aggregate accumulate: fold one row into the accumulator. The author's
+/// function returns nothing; `result` is written only if the row's arguments
+/// can't be read.
 ///
 /// # Safety
-/// `args` is valid. Its `user_data` was set by a prior prerun. `T` matches.
-pub unsafe fn dispatch_accumulate<T>(f: fn(&mut T, &[InValue]), args: *mut vef_vdf_args_t) {
+/// `args` and `result` are valid. `user_data` was set by a prior prerun. `T` matches.
+pub unsafe fn dispatch_accumulate<T>(
+    f: fn(&mut T, &[InValue]),
+    args: *mut vef_vdf_args_t,
+    result: *mut vef_vdf_result_t,
+) {
     let args = &*args;
     let state = borrow_state::<T>(args.user_data);
-    let in_values = read_in_values(args);
-    f(state, &in_values);
+    match read_in_values(args) {
+        Ok(in_values) => f(state, &in_values),
+        Err(msg) => write_result(VdfReturn::Error(msg), &mut *result),
+    }
 }
 
 /// Aggregate result: produce the group's output from the finished accumulator.
@@ -958,10 +993,14 @@ pub unsafe fn dispatch_from_string_typed<P>(
     let s: &str = match raw_vals.first().map(|&ptr| &*ptr) {
         Some(v) if !v.is_null && v.type_ == vef_type_id_VEF_TYPE_STRING => {
             let anon = &v.__bindgen_anon_1.__bindgen_anon_1;
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                anon.str_value.cast::<u8>(),
-                anon.str_len,
-            ))
+            let bytes = std::slice::from_raw_parts(anon.str_value.cast::<u8>(), anon.str_len);
+            match str_arg(0, bytes) {
+                Ok(s) => s,
+                Err(msg) => {
+                    write_result(VdfReturn::Error(msg), result);
+                    return;
+                }
+            }
         }
         Some(v) if v.is_null => {
             result.type_ = vef_return_value_type_t_VEF_RESULT_NULL;
@@ -1151,12 +1190,12 @@ unsafe fn write_error_msg(msg: &[u8], buf: *mut c_char) {
     *buf.add(n) = 0;
 }
 
-/// Turn a C string pointer into a borrowed `&str`.
+/// Turn a C string pointer into a borrowed `&str`, or `None` if it isn't UTF-8.
 ///
 /// # Safety
-/// `p` must point to a valid, NUL-terminated, UTF-8 string that lives for `'a`.
-unsafe fn cstr_to_str<'a>(p: *const c_char) -> &'a str {
-    std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(p).to_bytes())
+/// `p` must point to a valid, NUL-terminated string that lives for `'a`.
+unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
+    std::str::from_utf8(std::ffi::CStr::from_ptr(p).to_bytes()).ok()
 }
 
 unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
@@ -1779,13 +1818,14 @@ macro_rules! agg_func {
             ) {
                 $crate::dispatch_clear::<$state>($clear, args);
             }
-            // accumulate trampoline: result param unused (server pre-sets VALUE).
+            // accumulate trampoline: the server pre-sets VALUE. The SDK writes
+            // `result` only to fail a row whose arguments can't be read.
             unsafe extern "C" fn [< __vsql_accumulate_ $result_fn >](
                 _ctx: *mut $crate::sys::vef_context_t,
                 args: *mut $crate::sys::vef_vdf_args_t,
-                _result: *mut $crate::sys::vef_vdf_result_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
             ) {
-                $crate::dispatch_accumulate::<$state>($accum, args);
+                $crate::dispatch_accumulate::<$state>($accum, args, result);
             }
             static [< __VSQL_PARAMS_ $result_fn:upper >]: &[$crate::Type] = &[$($param),*];
             $crate::FuncDescriptor {
@@ -3016,5 +3056,69 @@ mod tests {
         let (needed, overflow) = write_inferred_params(&mut buf, &[]);
         assert_eq!(needed, 0);
         assert!(!overflow);
+    }
+
+    // -- UTF-8 checks on STRING arguments and server C strings ---
+
+    /// Build one non-NULL STRING argument over `bytes`.
+    fn string_invalue(bytes: &[u8]) -> villagesql_sys::vef_invalue_t {
+        // SAFETY: an all-zero vef_invalue_t is a valid plain-data value; we then
+        // set the fields a STRING argument uses.
+        let mut v: villagesql_sys::vef_invalue_t = unsafe { std::mem::zeroed() };
+        v.type_ = vef_type_id_VEF_TYPE_STRING;
+        v.is_null = false;
+        v.__bindgen_anon_1.__bindgen_anon_1.str_value = bytes.as_ptr().cast::<c_char>();
+        v.__bindgen_anon_1.__bindgen_anon_1.str_len = bytes.len();
+        v
+    }
+
+    /// Run `read_in_values` over `vals` and report what it produced.
+    fn read_strings(vals: &mut [villagesql_sys::vef_invalue_t]) -> Result<Vec<String>, String> {
+        let mut ptrs: Vec<*mut villagesql_sys::vef_invalue_t> =
+            vals.iter_mut().map(std::ptr::from_mut).collect();
+        // SAFETY: an all-zero vef_vdf_args_t is valid; we point it at `ptrs`.
+        let mut args: vef_vdf_args_t = unsafe { std::mem::zeroed() };
+        args.value_count = u32::try_from(ptrs.len()).unwrap();
+        args.__bindgen_anon_1.values = ptrs.as_mut_ptr();
+        // SAFETY: `args` points at live values for the duration of the call.
+        let values = unsafe { read_in_values(&args) }?;
+        Ok(values
+            .iter()
+            .map(|v| match v {
+                InValue::String(s) => (*s).to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect())
+    }
+
+    #[test]
+    fn read_in_values_accepts_multibyte_utf8() {
+        let mut vals = [string_invalue("café ✓".as_bytes())];
+        assert_eq!(read_strings(&mut vals), Ok(vec!["café ✓".to_string()]));
+    }
+
+    #[test]
+    fn read_in_values_rejects_invalid_utf8() {
+        // latin1 'café': 0xE9 alone is not UTF-8.
+        let mut vals = [string_invalue(b"caf\xe9")];
+        let err = read_strings(&mut vals).unwrap_err();
+        assert!(err.starts_with("argument 1 is not valid UTF-8"), "{err}");
+        assert!(err.contains("offset 3"), "{err}");
+    }
+
+    #[test]
+    fn read_in_values_names_the_bad_argument() {
+        let mut vals = [string_invalue(b"ok"), string_invalue(b"\xff")];
+        let err = read_strings(&mut vals).unwrap_err();
+        assert!(err.starts_with("argument 2 "), "{err}");
+    }
+
+    #[test]
+    fn cstr_to_str_rejects_invalid_utf8() {
+        // SAFETY: both are NUL-terminated static C strings.
+        unsafe {
+            assert_eq!(cstr_to_str(c"width".as_ptr()), Some("width"));
+            assert_eq!(cstr_to_str(c"\xff".as_ptr()), None);
+        }
     }
 }
