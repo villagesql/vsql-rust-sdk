@@ -1623,16 +1623,7 @@ macro_rules! func {
                 args: *mut $crate::sys::vef_vdf_args_t,
                 result: *mut $crate::sys::vef_vdf_result_t,
             ) {
-                // let panic_result = std::panic::catch_unwind(|| {
-                    $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
-                // });
-
-                // match panic_result {
-                //     Ok(()) => (),
-                //     Err(panic_payload) => {
-                //         write_result(VdfReturn::Error(panic_payload, result));
-                //     }
-                // }
+                $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
             }
             // prerun trampoline
             unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
