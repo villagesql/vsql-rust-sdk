@@ -224,26 +224,26 @@ SELECT tvector::resolve_params('dimension=abc');
 ERROR HY000: VDF error in function 'tvector::resolve_params': tvector: bad dimension: invalid digit found in string
 SELECT tvector::resolve_params('dimension=3,type=int');
 ERROR HY000: VDF error in function 'tvector::resolve_params': tvector: type must be 'float' or 'double', got "int"
-# Error: a STRING argument that isn't valid UTF-8 is rejected, not trusted
+# A STRING argument that isn't valid UTF-8 is rejected, not trusted
 SELECT counter::from_string(_binary 0xff);
-ERROR HY000: VDF error in function 'counter::from_string': argument 1 is not valid UTF-8 (invalid byte at offset 0); convert it with CONVERT(... USING utf8mb4)
+counter::from_string(_binary 0xff)
+NULL
+Warnings:
+Warning	3200	VDF error in function 'counter::from_string': argument 1 is not valid UTF-8 at byte offset 0; convert it with CONVERT(... USING utf8mb4)
 SELECT padint::resolve_params(_binary 0xff);
-ERROR HY000: VDF error in function 'padint::resolve_params': argument 1 is not valid UTF-8 (invalid byte at offset 0); convert it with CONVERT(... USING utf8mb4)
+ERROR HY000: VDF error in function 'padint::resolve_params': argument 1 is not valid UTF-8 at byte offset 0; convert it with CONVERT(... USING utf8mb4)
 # (an aggregate's accumulate reports it too)
 SELECT sdk_len_sum(s) FROM (VALUES ROW('ab'), ROW('cé')) AS t(s);
 sdk_len_sum(s)
 5
 SELECT sdk_len_sum(s) FROM (VALUES ROW('ab'), ROW(_binary 0xff), ROW('cd')) AS t(s);
-ERROR HY000: VDF error in function 'sdk_len_sum': argument 1 is not valid UTF-8 (invalid byte at offset 0); convert it with CONVERT(... USING utf8mb4)
+ERROR HY000: VDF error in function 'sdk_len_sum': argument 1 is not valid UTF-8 at byte offset 0; convert it with CONVERT(... USING utf8mb4)
 # (a constant goes through the server's params-inference path)
 SELECT padint::from_string(_binary 0xff);
-ERROR HY000: error encountered during padint::from_string inference: argument 1 is not valid UTF-8 (invalid byte at offset 0); convert it with CONVERT(... USING utf8mb4)
+ERROR HY000: error encountered during padint::from_string inference: argument 1 is not valid UTF-8 at byte offset 0; convert it with CONVERT(... USING utf8mb4)
 # (a typed column encodes through the type's from_string and reports a bad value)
 CREATE TABLE pbad (p sdk_coverage.padint(5));
 INSERT INTO pbad VALUES (_binary 0xff);
-ERROR HY000: argument 1 is not valid UTF-8 (invalid byte at offset 0); convert it with CONVERT(... USING utf8mb4)
+ERROR HY000: Incorrect padint value: '\xFF' for column 'p' at row 1
 DROP TABLE pbad;
-SELECT 1;
-1
-1
 UNINSTALL EXTENSION sdk_coverage;

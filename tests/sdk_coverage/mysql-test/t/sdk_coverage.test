@@ -143,8 +143,7 @@ SELECT tvector::resolve_params('dimension=abc');
 --error ER_UDF_ERROR
 SELECT tvector::resolve_params('dimension=3,type=int');
 
---echo # Error: a STRING argument that isn't valid UTF-8 is rejected, not trusted
---error ER_UDF_ERROR
+--echo # A STRING argument that isn't valid UTF-8 is rejected, not trusted
 SELECT counter::from_string(_binary 0xff);
 --error ER_UDF_ERROR
 SELECT padint::resolve_params(_binary 0xff);
@@ -157,9 +156,8 @@ SELECT sdk_len_sum(s) FROM (VALUES ROW('ab'), ROW(_binary 0xff), ROW('cd')) AS t
 SELECT padint::from_string(_binary 0xff);
 --echo # (a typed column encodes through the type's from_string and reports a bad value)
 CREATE TABLE pbad (p sdk_coverage.padint(5));
---error ER_VILLAGESQL_GENERIC_ERROR
+--error ER_TRUNCATED_WRONG_VALUE_FOR_FIELD
 INSERT INTO pbad VALUES (_binary 0xff);
 DROP TABLE pbad;
-SELECT 1;
 
 UNINSTALL EXTENSION sdk_coverage;

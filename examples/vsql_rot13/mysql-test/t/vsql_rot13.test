@@ -39,7 +39,4 @@ DROP TABLE t2;
 --echo # Valid multi-byte UTF-8 still passes through
 SELECT rot13('café ✓ 日本');
 
---echo # The server is still up
-SELECT 1;
-
 UNINSTALL EXTENSION vsql_rot13;

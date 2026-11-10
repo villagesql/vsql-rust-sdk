@@ -216,9 +216,10 @@ impl<'a> TypeParams<'a> {
         self.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
     }
 
-    /// Walk through every `(key, value)` pair. A pair that isn't valid UTF-8 is
-    /// skipped, so [`TypeParams::get`] doesn't find it. The server stores
-    /// parameters as UTF-8, so this doesn't happen in practice.
+    /// Walk through every `(key, value)` pair. The server rejects parameters that
+    /// aren't valid UTF-8, so every pair is returned. The SDK checks each one
+    /// instead of assuming it, so a server bug can't cause undefined behavior.
+    /// A pair that fails the check is skipped.
     pub fn iter(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
         let (keys, values) = (self.raw.keys, self.raw.values);
         (0..self.len()).filter_map(move |i| unsafe {
@@ -830,7 +831,7 @@ unsafe fn read_in_values(args: &vef_vdf_args_t) -> Result<Vec<InValue<'_>>, Stri
 fn str_arg(i: usize, bytes: &[u8]) -> Result<&str, String> {
     std::str::from_utf8(bytes).map_err(|e| {
         format!(
-            "argument {} is not valid UTF-8 (invalid byte at offset {}); \
+            "argument {} is not valid UTF-8 at byte offset {}; \
              convert it with CONVERT(... USING utf8mb4)",
             i + 1,
             e.valid_up_to()
@@ -850,6 +851,24 @@ pub unsafe fn dispatch_vdf(
     let ret = match read_in_values(&*args) {
         Ok(in_values) => f(&in_values),
         Err(msg) => VdfReturn::Error(msg),
+    };
+    write_result(ret, &mut *result);
+}
+
+/// [`dispatch_vdf`] for a type's `from_string`: invalid UTF-8 is a bad value,
+/// so it's a warning, not an error.
+///
+/// # Safety
+/// `args` and `result` must be valid for the duration of the call.
+#[doc(hidden)]
+pub unsafe fn dispatch_from_string(
+    f: fn(&[InValue]) -> VdfReturn,
+    args: *mut vef_vdf_args_t,
+    result: *mut vef_vdf_result_t,
+) {
+    let ret = match read_in_values(&*args) {
+        Ok(in_values) => f(&in_values),
+        Err(msg) => VdfReturn::warning(msg),
     };
     write_result(ret, &mut *result);
 }
@@ -997,7 +1016,7 @@ pub unsafe fn dispatch_from_string_typed<P>(
             match str_arg(0, bytes) {
                 Ok(s) => s,
                 Err(msg) => {
-                    write_result(VdfReturn::Error(msg), result);
+                    write_result(VdfReturn::warning(msg), result);
                     return;
                 }
             }
@@ -2132,7 +2151,7 @@ macro_rules! __vsql_type_vdfs {
                 args: *mut $crate::sys::vef_vdf_args_t,
                 result: *mut $crate::sys::vef_vdf_result_t,
             ) {
-                $crate::dispatch_vdf([< __vsql_from_string_vdf_ $enc_fn >], args, result);
+                $crate::dispatch_from_string([< __vsql_from_string_vdf_ $enc_fn >], args, result);
             }
             static [< __VSQL_FROM_STRING_PARAMS_ $enc_fn:upper >]: &[$crate::Type] =
                 &[$crate::Type::String];
