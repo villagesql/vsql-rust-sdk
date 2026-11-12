@@ -41,6 +41,27 @@ fn sdk_warn_if_negative_impl(args: &[InValue]) -> VdfReturn {
     }
 }
 
+// ── Aggregate over STRING: total byte length ─────────────────────────────────
+
+#[derive(Default)]
+pub struct LenSum {
+    total: i64,
+}
+
+fn sdk_len_sum_clear(state: &mut LenSum) {
+    state.total = 0;
+}
+
+fn sdk_len_sum_acc(state: &mut LenSum, args: &[InValue]) {
+    if let Some(InValue::String(s)) = args.first() {
+        state.total += i64::try_from(s.len()).unwrap_or(i64::MAX);
+    }
+}
+
+fn sdk_len_sum_result(state: &LenSum) -> VdfReturn {
+    VdfReturn::int(state.total)
+}
+
 // ── Type 1: counter (wraps i64, decimal string representation) ────────────────
 
 pub fn counter_encode(s: &str) -> Result<Vec<u8>, String> {
@@ -361,6 +382,9 @@ villagesql::extension! {
             [villagesql::Type::Real] -> villagesql::Type::Real),
         villagesql::func!(sdk_warn_if_negative_impl, "sdk_warn_if_negative",
             [villagesql::Type::Int] -> villagesql::Type::Int),
+        villagesql::agg_func!(sdk_len_sum_result, "sdk_len_sum",
+            [villagesql::Type::String] -> villagesql::Type::Int,
+            state: LenSum, clear: sdk_len_sum_clear, accumulate: sdk_len_sum_acc),
     ],
     types: [
         villagesql::custom_type!(
