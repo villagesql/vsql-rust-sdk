@@ -958,6 +958,7 @@ pub unsafe fn dispatch_clear<T>(f: fn(&mut T), args: *mut vef_vdf_args_t) {
 ///
 /// # Safety
 /// `args` and `result` are valid. `user_data` was set by a prior prerun. `T` matches.
+#[doc(hidden)]
 pub unsafe fn dispatch_accumulate<T>(
     f: fn(&mut T, &[InValue]),
     args: *mut vef_vdf_args_t,
