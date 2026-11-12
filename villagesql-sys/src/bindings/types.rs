@@ -725,10 +725,11 @@ pub struct vef_type_desc_t {
     pub intrinsic_default_str: *const ::std::os::raw::c_char,
     pub max_persisted_length: i64,
     pub variable_length: bool,
+    pub from_binary_vdf_name: *const ::std::os::raw::c_char,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of vef_type_desc_t"][::std::mem::size_of::<vef_type_desc_t>() - 144usize];
+    ["Size of vef_type_desc_t"][::std::mem::size_of::<vef_type_desc_t>() - 152usize];
     ["Alignment of vef_type_desc_t"][::std::mem::align_of::<vef_type_desc_t>() - 8usize];
     ["Offset of field: vef_type_desc_t::protocol"]
         [::std::mem::offset_of!(vef_type_desc_t, protocol) - 0usize];
@@ -766,6 +767,8 @@ const _: () = {
         [::std::mem::offset_of!(vef_type_desc_t, max_persisted_length) - 128usize];
     ["Offset of field: vef_type_desc_t::variable_length"]
         [::std::mem::offset_of!(vef_type_desc_t, variable_length) - 136usize];
+    ["Offset of field: vef_type_desc_t::from_binary_vdf_name"]
+        [::std::mem::offset_of!(vef_type_desc_t, from_binary_vdf_name) - 144usize];
 };
 pub type vef_extension_init_func_t = ::std::option::Option<unsafe extern "C" fn()>;
 pub type vef_extension_deinit_func_t = ::std::option::Option<unsafe extern "C" fn()>;

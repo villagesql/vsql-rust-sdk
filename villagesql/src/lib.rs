@@ -1295,6 +1295,7 @@ pub unsafe fn build_registration(
             intrinsic_default_str: t.descriptor.intrinsic_default_str,
             max_persisted_length: t.descriptor.max_persisted_length,
             variable_length: false,
+            from_binary_vdf_name: std::ptr::null(),
         })));
     }
     let type_count = u32::try_from(type_ptrs.len()).expect("type count exceeds u32");
