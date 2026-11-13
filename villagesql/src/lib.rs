@@ -89,7 +89,7 @@ use std::ffi::c_char;
 use std::marker::PhantomData;
 use std::sync::{OnceLock, RwLock};
 use villagesql_sys::{
-    vef_func_desc_t, vef_postrun_args_t, vef_prerun_args_t, vef_prerun_result_t,
+    vef_func_desc_t, vef_postrun_args_t, vef_prerun_args_t, vef_prerun_result_t, vef_protocol_t,
     vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t, vef_required_capability_t,
     vef_return_value_type_t_VEF_RESULT_ERROR, vef_return_value_type_t_VEF_RESULT_NULL,
     vef_return_value_type_t_VEF_RESULT_VALUE, vef_return_value_type_t_VEF_RESULT_WARNING,
@@ -630,6 +630,25 @@ pub struct TypeWithFuncs {
 // `FuncDescriptor`s, which are themselves `Send + Sync` for the same reason.
 unsafe impl Send for TypeWithFuncs {}
 unsafe impl Sync for TypeWithFuncs {}
+
+/// The lowest protocol this SDK registers at: oldest stable protocol it supports.
+const MIN_PROTOCOL: vef_protocol_t = vef_protocol_t_VEF_PROTOCOL_3;
+
+impl FuncDescriptor {
+    /// The lowest protocol the server must support to run this function.
+    #[allow(clippy::unused_self)] // until the first new protocol feature lands
+    fn required_protocol(&self) -> vef_protocol_t {
+        MIN_PROTOCOL
+    }
+}
+
+impl TypeDescriptor {
+    /// The lowest protocol the server must support to load this type.
+    #[allow(clippy::unused_self)] // until variable_length lands
+    fn required_protocol(&self) -> vef_protocol_t {
+        MIN_PROTOCOL
+    }
+}
 
 // Prerun / Postrun
 
@@ -1218,7 +1237,7 @@ unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
     std::str::from_utf8(std::ffi::CStr::from_ptr(p).to_bytes()).ok()
 }
 
-unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
+unsafe fn build_func_ptr(d: &FuncDescriptor, protocol: vef_protocol_t) -> *mut vef_func_desc_t {
     let (param_count, params_ptr) = if d.varargs {
         (villagesql_sys::VEF_PARAM_VARARGS, std::ptr::null())
     } else {
@@ -1232,7 +1251,9 @@ unsafe fn build_func_ptr(d: &FuncDescriptor) -> *mut vef_func_desc_t {
         return_type: d.returns.to_raw(),
     }));
     Box::into_raw(Box::new(vef_func_desc_t {
-        protocol: vef_protocol_t_VEF_PROTOCOL_3,
+        // The server will reject any function whose protocol is below the
+        // registration's, so every function is stamped with the registration's protocol.
+        protocol,
         name: d.sql_name,
         signature: sig,
         vdf: Some(d.trampoline),
@@ -1260,16 +1281,20 @@ pub unsafe fn build_registration(
     types: &[TypeWithFuncs],
     caps: &[RequiredCapability],
 ) -> *mut vef_registration_t {
+    // Protocol: the highest any function or type needs, never below MIN_PROTOCOL
+    let all_funcs = || {
+        funcs
+            .iter()
+            .chain(types.iter().flat_map(|t| &t.embedded_funcs))
+    };
+    let protocol = all_funcs()
+        .map(FuncDescriptor::required_protocol)
+        .chain(types.iter().map(|t| t.descriptor.required_protocol()))
+        .fold(MIN_PROTOCOL, Ord::max);
+
     // ── Functions: explicit + embedded from each type ─────────────────────────
-    let mut func_ptrs: Vec<*mut vef_func_desc_t> = Vec::new();
-    for d in funcs {
-        func_ptrs.push(build_func_ptr(d));
-    }
-    for t in types {
-        for d in &t.embedded_funcs {
-            func_ptrs.push(build_func_ptr(d));
-        }
-    }
+    let func_ptrs: Vec<*mut vef_func_desc_t> =
+        all_funcs().map(|d| build_func_ptr(d, protocol)).collect();
     let func_count = u32::try_from(func_ptrs.len()).expect("func count exceeds u32");
     let funcs_ptr = Box::into_raw(func_ptrs.into_boxed_slice()).cast::<*mut vef_func_desc_t>();
 
@@ -1277,7 +1302,7 @@ pub unsafe fn build_registration(
     let mut type_ptrs: Vec<*mut vef_type_desc_t> = Vec::with_capacity(types.len());
     for t in types {
         type_ptrs.push(Box::into_raw(Box::new(vef_type_desc_t {
-            protocol: vef_protocol_t_VEF_PROTOCOL_3,
+            protocol: t.descriptor.required_protocol(),
             name: t.descriptor.sql_name,
             persisted_length: t.descriptor.persisted_length,
             max_decode_buffer_length: t.descriptor.max_decode_buffer_length,
@@ -1308,7 +1333,7 @@ pub unsafe fn build_registration(
         Box::into_raw(cap_raws).cast::<vef_required_capability_t>();
 
     Box::into_raw(Box::new(vef_registration_t {
-        protocol: vef_protocol_t_VEF_PROTOCOL_3,
+        protocol,
         error_msg: std::ptr::null_mut(),
         deprecated_extension_version: std::ptr::null(),
         sdk_version: villagesql_sys::SDK_VERSION,
@@ -1324,6 +1349,32 @@ pub unsafe fn build_registration(
     }))
 }
 
+/// Build the registration, then mark it failed if the server's protocol is too old.
+///
+/// # Safety
+/// `arg` must be null or point to a valid `vef_register_arg_t`. The descriptors
+/// follow the same rules as [`build_registration`].
+#[must_use]
+pub unsafe fn register(
+    arg: *const villagesql_sys::vef_register_arg_t,
+    funcs: &[FuncDescriptor],
+    types: &[TypeWithFuncs],
+    caps: &[RequiredCapability],
+) -> *mut vef_registration_t {
+    let reg = build_registration(funcs, types, caps);
+    if let Some(arg) = arg.as_ref() {
+        let required = (*reg).protocol;
+        if arg.protocol < required {
+            let msg = format!(
+                "extension needs VEF protocol {required}, but the server supports at most {}",
+                arg.protocol
+            );
+            (*reg).error_msg = std::ffi::CString::new(msg).unwrap_or_default().into_raw();
+        }
+    }
+    reg
+}
+
 /// Free all memory allocated by [`build_registration`].
 ///
 /// # Safety
@@ -1333,6 +1384,9 @@ pub unsafe fn free_registration(registration: *mut vef_registration_t) {
         return;
     }
     let reg = Box::from_raw(registration);
+    if !reg.error_msg.is_null() {
+        drop(std::ffi::CString::from_raw(reg.error_msg));
+    }
 
     // Free functions.
     let funcs = std::slice::from_raw_parts_mut(reg.funcs, reg.func_count as usize);
@@ -1467,12 +1521,12 @@ macro_rules! extension {
     ) => {
         #[no_mangle]
         pub unsafe extern "C" fn vef_register(
-            _arg: *const $crate::sys::vef_register_arg_t,
+            arg: *const $crate::sys::vef_register_arg_t,
         ) -> *mut $crate::sys::vef_registration_t {
             let funcs: &[$crate::FuncDescriptor] = &[$($func_desc),*];
             let types: ::std::vec::Vec<$crate::TypeWithFuncs> = vec![$($type_desc),*];
             let caps: &[$crate::preview::RequiredCapability] = &[$($crate::preview::Capability::request($cap)),*];
-            $crate::build_registration(funcs, &types, caps)
+            $crate::register(arg, funcs, &types, caps)
         }
 
         #[no_mangle]
@@ -3141,6 +3195,58 @@ mod tests {
         unsafe {
             assert_eq!(cstr_to_str(c"width".as_ptr()), Some("width"));
             assert_eq!(cstr_to_str(c"\xff".as_ptr()), None);
+        }
+    }
+
+    // -- register: protocol gate ---
+
+    /// A fake `vef_register_arg_t`, as the server would pass to `vef_register`.
+    fn register_arg(protocol: vef_protocol_t) -> villagesql_sys::vef_register_arg_t {
+        let version = villagesql_sys::vef_version_t {
+            major: 0,
+            minor: 0,
+            patch: 0,
+            extra: std::ptr::null(),
+        };
+        villagesql_sys::vef_register_arg_t {
+            protocol,
+            mysql_version: version,
+            vef_version: version,
+        }
+    }
+
+    #[test]
+    fn register_accepts_server_at_min_protocol() {
+        let arg = register_arg(MIN_PROTOCOL);
+        unsafe {
+            let reg = register(&raw const arg, &[], &[], &[]);
+            assert!((*reg).error_msg.is_null());
+            assert_eq!((*reg).protocol, MIN_PROTOCOL);
+            free_registration(reg);
+        }
+    }
+
+    #[test]
+    fn register_rejects_server_below_required_protocol() {
+        let arg = register_arg(MIN_PROTOCOL - 1);
+        unsafe {
+            let reg = register(&raw const arg, &[], &[], &[]);
+            assert!(!(*reg).error_msg.is_null());
+            let msg = std::ffi::CStr::from_ptr((*reg).error_msg).to_str().unwrap();
+            assert!(
+                msg.contains("needs VEF protocol"),
+                "unexpected message: {msg}"
+            );
+            free_registration(reg);
+        }
+    }
+
+    #[test]
+    fn register_with_null_arg_skips_gate() {
+        unsafe {
+            let reg = register(std::ptr::null(), &[], &[], &[]);
+            assert!((*reg).error_msg.is_null());
+            free_registration(reg);
         }
     }
 }
