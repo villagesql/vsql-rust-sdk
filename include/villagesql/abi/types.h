@@ -204,6 +204,8 @@ typedef enum : unsigned int {
                    //   admitting every STRING.
                    // + from_binary_vdf_name on vef_type_desc_t: a type may
                    //   declare an encode from its binary form.
+                   // + to_binary_vdf_name on vef_type_desc_t: a type may
+                   //   declare a decode to its binary form.
 } vef_protocol_t;
 
 // This is the protocol version of these headers: the version the server
@@ -634,8 +636,8 @@ typedef struct {
   // protocol >= VEF_PROTOCOL_4
   // For each argument: its value if it is a constant, NULL otherwise. A
   // constant is an argument the server can evaluate before the first row,
-  // such as a literal or an expression over literals; a prepared-statement
-  // parameter or a subquery never is. Each value is what the VDF will receive
+  // such as a literal, an expression over literals or a prepared-statement
+  // parameter; a subquery never is. Each value is what the VDF will receive
   // for that argument, so a NULL literal is a STRING with is_null set.
   // Array has arg_count elements.
   const vef_invalue_t **const_args;
@@ -1058,6 +1060,17 @@ typedef struct {
   //
   // Read only when protocol >= VEF_PROTOCOL_4.
   const char *from_binary_vdf_name;
+
+  // OPTIONAL: Name of a VDF (from this extension's funcs[]) that decodes the
+  // type to its binary form rather than its text form, the inverse of
+  // from_binary_vdf_name. The named VDF must have signature
+  // (CUSTOM(this type)) -> BINARY and is also registered as a callable SQL
+  // function. NULL means the type has no decode to its binary form. The
+  // binary form is the same on every platform: the type defines the byte
+  // order of its multi-byte numbers, such as little-endian.
+  //
+  // Read only when protocol >= VEF_PROTOCOL_4.
+  const char *to_binary_vdf_name;
 } vef_type_desc_t;
 
 // Forward declaration so vef_required_capability_t can reference it.
