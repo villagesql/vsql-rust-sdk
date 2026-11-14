@@ -77,7 +77,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// ── Discovery ─────────────────────────────────────────────────────────────────
+// ---- Discovery helpers ----------------------------------------------------
 
 fn extension_name(dir: &Path) -> Result<String> {
     let path = dir.join("Cargo.toml");
@@ -96,29 +96,25 @@ fn extension_name(dir: &Path) -> Result<String> {
     Ok(manifest.package.name)
 }
 
+/// Let Cargo distinguish workspace members, excluded packages, and standalone projects.
 fn workspace_root(start: &Path) -> Result<PathBuf> {
-    let mut dir = start.to_path_buf();
-    let mut last_cargo_dir: Option<PathBuf> = None;
-    loop {
-        let cargo_toml = dir.join("Cargo.toml");
-        if cargo_toml.exists() {
-            let content = std::fs::read_to_string(&cargo_toml)?;
-            let parsed: toml::Value = toml::from_str(&content)?;
-            if parsed.get("workspace").is_some() {
-                return Ok(dir);
-            }
-            last_cargo_dir = Some(dir.clone());
-        }
-        if !dir.pop() {
-            if let Some(implicit_root) = last_cargo_dir {
-                return Ok(implicit_root);
-            }
-            bail!(
-                "could not find workspace root (no Cargo.toml above {})",
-                start.display()
-            );
-        }
+    let output = Command::new("cargo")
+        .args(["locate-project", "--workspace", "--message-format", "plain"])
+        .current_dir(start)
+        .output()
+        .context("running cargo locate-project")?;
+    if !output.status.success() {
+        bail!(
+            "cargo locate-project failed:\n{}",
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        );
     }
+    let manifest = String::from_utf8(output.stdout)
+        .context("cargo locate-project returned a non-UTF-8 manifest path")?;
+    Path::new(manifest.trim())
+        .parent()
+        .map(Path::to_path_buf)
+        .context("cargo locate-project returned no manifest directory")
 }
 
 // TODO(villagesql-windows): handle dlls
@@ -138,6 +134,8 @@ fn find_lib(name: &str, workspace_root: &Path) -> Result<PathBuf> {
         name
     )
 }
+
+// ---- End discovery helpers ------------------------------------------------
 
 // ── Subcommand implementations ────────────────────────────────────────────────
 // TODO(villagesql): handle building extension in debug mode.
