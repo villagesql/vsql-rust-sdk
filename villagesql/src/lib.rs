@@ -636,7 +636,7 @@ const MIN_PROTOCOL: vef_protocol_t = vef_protocol_t_VEF_PROTOCOL_3;
 
 impl FuncDescriptor {
     /// The lowest protocol the server must support to run this function.
-    #[allow(clippy::unused_self)] // until the first new protocol feature lands
+    #[expect(clippy::unused_self)]
     fn required_protocol(&self) -> vef_protocol_t {
         MIN_PROTOCOL
     }
@@ -644,7 +644,7 @@ impl FuncDescriptor {
 
 impl TypeDescriptor {
     /// The lowest protocol the server must support to load this type.
-    #[allow(clippy::unused_self)] // until variable_length lands
+    #[expect(clippy::unused_self)]
     fn required_protocol(&self) -> vef_protocol_t {
         MIN_PROTOCOL
     }
@@ -1378,7 +1378,7 @@ pub unsafe fn register(
 /// Free all memory allocated by [`build_registration`].
 ///
 /// # Safety
-/// `registration` must have been returned by [`build_registration`].
+/// `registration` must have been returned by [`build_registration`] or [`register`].
 pub unsafe fn free_registration(registration: *mut vef_registration_t) {
     if registration.is_null() {
         return;
