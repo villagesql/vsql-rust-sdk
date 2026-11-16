@@ -5,7 +5,7 @@
 # else in CI notices when the server's headers move.
 #
 # Every header comes from the server's dev ABI (villagesql/sdk): it carries the
-# protocol 4 bind hook and the current preview capability ABIs, which is what
+# protocol 5 bind hook and the current preview capability ABIs, which is what
 # the nightly server these examples are tested against implements.
 #
 # One divergence is deliberate and allowed, in types.h: VEF_PARAM_VARARGS is spelled

@@ -12,6 +12,8 @@ pub const vef_protocol_t_VEF_PROTOCOL_1: vef_protocol_t = 1;
 pub const vef_protocol_t_VEF_PROTOCOL_2: vef_protocol_t = 2;
 pub const vef_protocol_t_VEF_PROTOCOL_3: vef_protocol_t = 3;
 pub const vef_protocol_t_VEF_PROTOCOL_4: vef_protocol_t = 4;
+pub const vef_protocol_t_VEF_PROTOCOL_5: vef_protocol_t = 5;
+pub const vef_protocol_t_VEF_PROTOCOL_6: vef_protocol_t = 6;
 pub type vef_protocol_t = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
