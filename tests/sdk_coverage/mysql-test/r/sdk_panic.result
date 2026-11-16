@@ -3,7 +3,7 @@ call mtr.add_suppression("VillageSQL.*Invalid value in column.*sdk_coverage");
 call mtr.add_suppression("VillageSQL.*hash VDF.*dispatch_vdf");
 # 1. Panic: within counter_encode
 SELECT counter::from_string('86');
-ERROR HY000: VDF error in function 'counter::from_string': panic!() in dispatch_vdf
+ERROR HY000: VDF error in function 'counter::from_string': panic!() in dispatch_from_string
 # Two types in one extension: ORDER BY counter then flag
 CREATE TABLE t1 (id INT, c counter, f flag);
 # 2. Panic: counter_decode on SELECT
