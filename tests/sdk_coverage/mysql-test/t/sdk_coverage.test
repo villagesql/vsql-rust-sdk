@@ -156,6 +156,8 @@ SELECT sdk_len_sum(s) FROM (VALUES ROW('ab'), ROW(_binary 0xff), ROW('cd')) AS t
 SELECT padint::from_string(_binary 0xff);
 --echo # (a typed column encodes through the type's from_string and reports a bad value)
 CREATE TABLE pbad (p sdk_coverage.padint(5));
+# Older servers show the value as '\xFF', newer ones as '0xFF'.
+--replace_regex /'.xFF'/'0xFF'/
 --error ER_TRUNCATED_WRONG_VALUE_FOR_FIELD
 INSERT INTO pbad VALUES (_binary 0xff);
 DROP TABLE pbad;

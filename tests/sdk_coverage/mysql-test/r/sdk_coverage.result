@@ -244,6 +244,6 @@ ERROR HY000: error encountered during padint::from_string inference: argument 1 
 # (a typed column encodes through the type's from_string and reports a bad value)
 CREATE TABLE pbad (p sdk_coverage.padint(5));
 INSERT INTO pbad VALUES (_binary 0xff);
-ERROR HY000: Incorrect padint value: '\xFF' for column 'p' at row 1
+ERROR HY000: Incorrect padint value: '0xFF' for column 'p' at row 1
 DROP TABLE pbad;
 UNINSTALL EXTENSION sdk_coverage;
