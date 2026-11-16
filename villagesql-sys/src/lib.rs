@@ -26,6 +26,6 @@ include!("bindings/preview/sql_query.rs");
 pub const SDK_VERSION: vef_version_t = vef_version_t {
     major: 0,
     minor: 0,
-    patch: 6,
+    patch: 8,
     extra: core::ptr::null(),
 };
