@@ -860,7 +860,11 @@ fn str_arg(i: usize, bytes: &[u8]) -> Result<&str, String> {
 }
 
 /// Turn a caught panic into an SQL error on result.
-unsafe fn report_panic(caught: std::thread::Result<()>, name: &str, result: &mut vef_vdf_result_t) {
+unsafe fn report_panic(
+    caught: &std::thread::Result<()>,
+    name: &str,
+    result: &mut vef_vdf_result_t,
+) {
     if caught.is_err() {
         write_result(VdfReturn::Error(format!("panic!() in {name}")), result);
     }
@@ -882,7 +886,7 @@ pub unsafe fn dispatch_vdf(
         };
         write_result(ret, &mut *result);
     }));
-    report_panic(panic_result, "dispatch_vdf", &mut *result);
+    report_panic(&panic_result, "dispatch_vdf", &mut *result);
 }
 
 /// [`dispatch_vdf`] for a type's `from_string`: invalid UTF-8 is a bad value,
@@ -903,7 +907,7 @@ pub unsafe fn dispatch_from_string(
         };
         write_result(ret, &mut *result);
     }));
-    report_panic(panic_result, "dispatch_from_string", &mut *result);
+    report_panic(&panic_result, "dispatch_from_string", &mut *result);
 }
 
 /// Prerun runner: wrap the raw slots and call the author's setup fn.
@@ -1084,7 +1088,7 @@ pub unsafe fn dispatch_from_string_typed<P>(
             maybe = MaybeParams::present(parse(Params::parse(&key)));
         }
     }));
-    report_panic(panic_result1, "dispatch_from_string_typed_1", &mut *result);
+    report_panic(&panic_result1, "dispatch_from_string_typed_1", &mut *result);
 
     // Run the author's encoder. When params were unknown, this is where it
     // inspects the string and fills them in via `set`. An `Err` is a bad value,
@@ -1098,7 +1102,7 @@ pub unsafe fn dispatch_from_string_typed<P>(
             };
             write_result(ret, result);
         }));
-        report_panic(panic_result2, "dispatch_from_string_typed_2", &mut *result);
+        report_panic(&panic_result2, "dispatch_from_string_typed_2", &mut *result);
     }
 
     // If the author inferred params (and the server gave us a buffer for them),
@@ -1118,7 +1122,7 @@ pub unsafe fn dispatch_from_string_typed<P>(
                 out.actual_len = needed;
                 out.overflow = overflow;
             }));
-            report_panic(panic_result3, "dispatch_from_string_typed_3", &mut *result);
+            report_panic(&panic_result3, "dispatch_from_string_typed_3", &mut *result);
         }
     }
 }
@@ -1151,7 +1155,7 @@ pub unsafe fn dispatch_intrinsic_default_typed<P>(
         write_result(ret, result);
     }));
     report_panic(
-        panic_result,
+        &panic_result,
         "dispatch_intrinsic_default_typed",
         &mut *result,
     );
@@ -1178,7 +1182,7 @@ pub unsafe fn dispatch_intrinsic_default(
 
         write_result(ret, result);
     }));
-    report_panic(panic_result, "dispatch_intrinsic_default", &mut *result);
+    report_panic(&panic_result, "dispatch_intrinsic_default", &mut *result);
 }
 
 /// Copy `bytes` into the server's result buffer `buf` (capacity `max`) and mark
