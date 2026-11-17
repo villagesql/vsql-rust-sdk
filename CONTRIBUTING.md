@@ -51,7 +51,9 @@ Regeneration requires `libclang-dev` (Ubuntu/Debian) or the equivalent LLVM deve
    cargo test
    ```
 
-4. Commit `villagesql-sys/src/bindings.rs` together with the header change.
+4. Set `SDK_VERSION` in `villagesql-sys/src/lib.rs` to the server release the headers came from. CI only catches a stale value if that release's headers differ.
+
+5. Commit `villagesql-sys/src/bindings/` and `villagesql-sys/src/lib.rs` together with the header change.
 
 ### CI enforcement
 
@@ -59,11 +61,26 @@ The `check-bindings` CI job regenerates `bindings.rs` and runs `git diff --exit-
 
 ## Release checklist
 
+Before publishing:
+
+- [ ] The server release this SDK targets has shipped. Never publish against an ABI that isn't in a released server
+- [ ] `main` contains only changes meant for this release. There's no release branch, so hold breaking PRs unmerged until after publishing
 - [ ] Update version in `villagesql-sys/Cargo.toml` (`villagesql-sys`), `villagesql/Cargo.toml` (`villagesql`), and `cargo-vsql/Cargo.toml`
+- [ ] Update the `villagesql-sys` dependency version in `villagesql/Cargo.toml` to match
 - [ ] Regenerate bindings if headers changed (see above)
+- [ ] `SDK_VERSION` in `villagesql-sys/src/lib.rs` matches the server version the vendored headers came from
 - [ ] `cargo test` passes
 - [ ] CI is green
+- [ ] The server's extension-compat run against the previous stable server release is green for this repo's extensions
+
+Publish:
+
 - [ ] Publish to crates.io (see below)
+
+After publishing:
+
+- [ ] Tag the exact commit you published from and push the tag: `git tag vX.Y.Z <commit>` then `git push origin vX.Y.Z`
+- [ ] Create a GitHub release for the tag with release notes (changes since the last tag, plus which server versions it supports)
 - [ ] Update the `villagesql` dependency pin in the Rust extension template
       (`vsql-extension-template-rust/Cargo.toml`) to the version just published
 
