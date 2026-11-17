@@ -51,7 +51,7 @@ Regeneration requires `libclang-dev` (Ubuntu/Debian) or the equivalent LLVM deve
    cargo test
    ```
 
-4. Bump `SDK_VERSION` in `villagesql-sys/src/lib.rs` to the server version the headers came from if necessary. CI doesn't catch a stale value.
+4. Set `SDK_VERSION` in `villagesql-sys/src/lib.rs` to the server release the headers came from. CI only catches a stale value if that release's headers differ.
 
 5. Commit `villagesql-sys/src/bindings.rs` and `villagesql-sys/src/lib.rs` together with the header change.
 
