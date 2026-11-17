@@ -26,7 +26,7 @@ sum(id)	c
 DROP TABLE t1;
 # 5. Panic: within counter_panic_default
 CREATE TABLE t_panic (id INT, c counter_panic_default NOT NULL, f flag);
-ERROR HY000: Type 'sdk_coverage.counter_panic_default' failed to initialize: intrinsic_default function failed: panic!() in dispatch_vdf_intrinsic_default
+ERROR HY000: Type 'sdk_coverage.counter_panic_default' failed to initialize: intrinsic_default function failed: panic!() in dispatch_intrinsic_default
 # 1. Panic: within padint_encode
 SELECT padint::from_string('86');
 ERROR HY000: error encountered during padint::from_string inference: panic!() in dispatch_from_string_typed_2
