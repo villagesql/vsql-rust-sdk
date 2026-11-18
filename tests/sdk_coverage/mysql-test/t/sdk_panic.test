@@ -138,5 +138,32 @@ SELECT SUM(tracked_postrun_panic()) AS total FROM t;
 
 DROP TABLE t;
 
+
+# Custom aggregate functions
+#  1. result function
+#  2. clear
+#  3. accumulate
+#  4. prerun use of T::default
+
+--echo #1. Panic: result function
+SELECT sdk_len_sum(s) FROM (VALUES ROW('12'), ROW('34'), ROW('56')) AS t(s);
+--error ER_UDF_ERROR
+SELECT sdk_len_sum_result_panic(s) FROM (VALUES ROW('12'), ROW('34'), ROW('56')) AS t(s);
+
+CREATE TABLE t1 (id INT, text VARCHAR(4));
+INSERT INTO t1 VALUES (1, '12'), (2, '34'), (3, '12'), (4, '12');
+
+# TODO(villagessql-general): no clear error reporting
+--echo #2. Panic: clear (first without panic)
+SELECT sdk_len_sum(text) from t1 GROUP BY text ORDER BY text;
+--echo                  (second with panic and wrong values)
+SELECT sdk_len_sum_clear_panic(text) from t1 GROUP BY text ORDER BY text;
+
+--echo #3. Panic: accumulate
+--error ER_UDF_ERROR
+SELECT sdk_len_sum_acc_panic(text) from t1;
+
+DROP TABLE t1;
+
 --source include/villagesql/decode_failure_log_end.inc
 UNINSTALL EXTENSION sdk_coverage;
