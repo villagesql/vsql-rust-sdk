@@ -131,7 +131,17 @@ fn write_temp_lib(veb: &Veb) -> Result<(TempDir, PathBuf)> {
         std::process::id(),
         TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    // Refuse a directory that already exists, so nobody can plant one at the guessable
+    // name, and keep the extracted library private to this user.
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
     let temp = TempDir(dir);
 
     let file_name = Path::new(&veb.lib_member)
