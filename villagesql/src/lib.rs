@@ -975,7 +975,7 @@ pub unsafe fn dispatch_postrun<T>(args: *mut vef_postrun_args_t) {
 /// # Safety
 /// `args` is valid (set by prerun). `T` matches what prerun set.
 #[doc(hidden)]
-// TODO(villagesql-general): no error reporting on panic
+// TODO(villagesql-general): no error reporting on postrun panic
 pub unsafe fn dispatch_postrun_with_hook<T>(f: fn(&mut T), args: *mut vef_postrun_args_t) {
     let raw = (*args).user_data;
     if !raw.is_null() {
@@ -1003,9 +1003,12 @@ pub unsafe fn dispatch_agg_prerun<T: Default>(
 /// # Safety
 /// `args` is valid. Its `user_data` was set by a prior prerun. `T` matches.
 #[doc(hidden)]
+// TODO(villagesql-general): no error reporting on clear panic
 pub unsafe fn dispatch_clear<T>(f: fn(&mut T), args: *mut vef_vdf_args_t) {
     let state = borrow_state::<T>((*args).user_data);
-    f(state);
+    let _panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        f(state);
+    }));
 }
 
 /// Aggregate accumulate: fold one row into the accumulator. The author's
@@ -1020,12 +1023,15 @@ pub unsafe fn dispatch_accumulate<T>(
     args: *mut vef_vdf_args_t,
     result: *mut vef_vdf_result_t,
 ) {
-    let args = &*args;
-    let state = borrow_state::<T>(args.user_data);
-    match read_in_values(args) {
-        Ok(in_values) => f(state, &in_values),
-        Err(msg) => write_result(VdfReturn::Error(msg), &mut *result),
-    }
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let args = &*args;
+        let state = borrow_state::<T>(args.user_data);
+        match read_in_values(args) {
+            Ok(in_values) => f(state, &in_values),
+            Err(msg) => write_result(VdfReturn::Error(msg), &mut *result),
+        }
+    }));
+    report_panic(&panic_result, "dispatch_accumulate", &mut *result);
 }
 
 /// Aggregate result: produce the group's output from the finished accumulator.
@@ -1039,8 +1045,11 @@ pub unsafe fn dispatch_agg_result<T>(
     args: *mut vef_vdf_args_t,
     result: *mut vef_vdf_result_t,
 ) {
-    let state = borrow_state::<T>((*args).user_data);
-    write_result(f(state), &mut *result);
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let state = borrow_state::<T>((*args).user_data);
+        write_result(f(state), &mut *result);
+    }));
+    report_panic(&panic_result, "dispatch_agg_result", &mut *result);
 }
 
 /// Dispatch a parameterized type's `from_string` (encode), including the

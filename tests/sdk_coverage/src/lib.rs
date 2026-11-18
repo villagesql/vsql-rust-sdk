@@ -88,14 +88,26 @@ fn sdk_len_sum_clear(state: &mut LenSum) {
     state.total = 0;
 }
 
+fn sdk_len_sum_clear_panic(_state: &mut LenSum) {
+    panic!("sdk_len_sum_clear_panic");
+}
+
 fn sdk_len_sum_acc(state: &mut LenSum, args: &[InValue]) {
     if let Some(InValue::String(s)) = args.first() {
         state.total += i64::try_from(s.len()).unwrap_or(i64::MAX);
     }
 }
 
+fn sdk_len_sum_acc_panic(_state: &mut LenSum, _args: &[InValue]) {
+    panic!("sdk_len_sum_acc_panic");
+}
+
 fn sdk_len_sum_result(state: &LenSum) -> VdfReturn {
     VdfReturn::int(state.total)
+}
+
+fn sdk_len_sum_result_panic(_state: &LenSum) -> VdfReturn {
+    panic!("sdk_len_sum_result_panic");
 }
 
 // ── Type 1: counter (wraps i64, decimal string representation) ────────────────
@@ -442,6 +454,15 @@ villagesql::extension! {
         villagesql::agg_func!(sdk_len_sum_result, "sdk_len_sum",
             [villagesql::Type::String] -> villagesql::Type::Int,
             state: LenSum, clear: sdk_len_sum_clear, accumulate: sdk_len_sum_acc),
+        villagesql::agg_func!(sdk_len_sum_result_panic, "sdk_len_sum_result_panic",
+            [villagesql::Type::String] -> villagesql::Type::Int,
+            state: LenSum, clear: sdk_len_sum_clear, accumulate: sdk_len_sum_acc),
+        villagesql::agg_func!(sdk_len_sum_result, "sdk_len_sum_acc_panic",
+            [villagesql::Type::String] -> villagesql::Type::Int,
+            state: LenSum, clear: sdk_len_sum_clear, accumulate: sdk_len_sum_acc_panic),
+        villagesql::agg_func!(sdk_len_sum_result, "sdk_len_sum_clear_panic",
+            [villagesql::Type::String] -> villagesql::Type::Int,
+            state: LenSum, clear: sdk_len_sum_clear_panic, accumulate: sdk_len_sum_acc),
         villagesql::func!(tracked, "tracked_no_panic", [] -> villagesql::Type::Int,
             state: Tracked, prerun: tracked_prerun, postrun: tracked_postrun),
         villagesql::func!(tracked, "tracked_prerun_panic", [] -> villagesql::Type::Int,
