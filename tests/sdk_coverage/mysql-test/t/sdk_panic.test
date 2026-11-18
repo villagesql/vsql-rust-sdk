@@ -108,10 +108,35 @@ SELECT padint::hash(padint::from_string('97'));
 --error ER_VILLAGESQL_GENERIC_ERROR
 CREATE TABLE tv_panic (id INT, tv sdk_coverage.tvector(13) NOT NULL);
 
-## Later, for functions
-#--echo # InValue::Int dispatch panic
-#--error ER_UDF_ERROR
-#SELECT sdk_identity_int(86);
 
---remove_file $MYSQLTEST_VARDIR/tmp/decode_fail_log_pos.txt
+# Custom functions: no state and with state object
+#  1. function, no state
+#  2. function, with state
+#  3. prerun, with state
+#  4. postrun, with state
+
+--echo # 1. Panic: stateless function (86 is panic)
+SELECT sdk_warn_if_negative(2);
+--error ER_UDF_ERROR
+SELECT sdk_warn_if_negative(86);
+
+CREATE TABLE t (id INT);
+INSERT INTO t VALUES (1), (2), (3);
+
+--echo # 2. Panic: function with state
+SELECT SUM(tracked_no_panic()) AS total FROM t;
+--error ER_UDF_ERROR
+SELECT SUM(tracked_func_panic()) AS total FROM t;
+
+--echo # 3. Panic: prerun
+--error ER_CANT_INITIALIZE_UDF
+SELECT SUM(tracked_prerun_panic()) AS total FROM t;
+
+# TODO(villagessql-general): no postrun error reporting
+--echo # 4. Panic: postrun
+SELECT SUM(tracked_postrun_panic()) AS total FROM t;
+
+DROP TABLE t;
+
+--source include/villagesql/decode_failure_log_end.inc
 UNINSTALL EXTENSION sdk_coverage;
