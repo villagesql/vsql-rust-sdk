@@ -554,12 +554,8 @@ pub struct FuncDescriptor {
         *mut vef_vdf_args_t,
         *mut vef_vdf_result_t,
     ),
-    /// Bytes to reserve for a string or binary result. `0` asks for the server
-    /// default.
-    pub buffer_size: usize,
-    /// Whether the same arguments always give the same answer. Only a deterministic
-    /// function may be used in a generated column or a `CHECK` constraint.
-    pub deterministic: bool,
+    /// The optional settings: result buffer size, determinism, and any added later.
+    pub settings: FuncSettings,
     /// Whether the function takes any number of arguments. The server then checks
     /// neither the count nor the types, leaving that to `prerun`.
     pub varargs: bool,
@@ -580,6 +576,28 @@ pub struct FuncDescriptor {
 // heap-allocated or interior-mutable, so sharing a descriptor across threads is sound.
 unsafe impl Send for FuncDescriptor {}
 unsafe impl Sync for FuncDescriptor {}
+
+/// The optional settings of a [`func!`], [`agg_func!`], or [`varargs_func!`]
+/// declaration. Built by the macro, do not construct this directly.
+///
+/// Each field is one optional key. A key the author leaves out takes its value
+/// from [`FuncSettings::DEFAULT`].
+#[derive(Clone, Copy, Debug)]
+pub struct FuncSettings {
+    /// Bytes to reserve for a string or binary result. `0` asks for the server
+    /// default.
+    pub buffer_size: usize,
+    /// Whether the same arguments always give the same answer.
+    pub deterministic: bool,
+}
+
+impl FuncSettings {
+    /// The value of every key an author leaves out.
+    pub const DEFAULT: Self = Self {
+        buffer_size: 0,
+        deterministic: false,
+    };
+}
 
 // ── Type descriptor ───────────────────────────────────────────────────────────
 
@@ -1358,8 +1376,8 @@ unsafe fn build_func_ptr(d: &FuncDescriptor, protocol: vef_protocol_t) -> *mut v
         vdf: Some(d.trampoline),
         prerun: d.prerun,
         postrun: d.postrun,
-        buffer_size: d.buffer_size,
-        deterministic: d.deterministic,
+        buffer_size: d.settings.buffer_size,
+        deterministic: d.settings.deterministic,
         clear: d.clear,
         accumulate: d.accumulate,
         max_result_length: 0,
@@ -1694,15 +1712,27 @@ macro_rules! extension {
 /// # let _ = (a, b, c);
 /// ```
 ///
-/// # Optional keys
+/// # Settings
+///
+/// Any combination of these may follow the signature, in any order. Each one
+/// left out takes its default.
 ///
 /// | Key | Meaning | Default |
 /// |---|---|---|
 /// | `buffer_size:` | Bytes the server reserves for the result. `0` asks for the server default. | `0` |
 /// | `deterministic:` | Whether the same arguments always give the same answer. | `false` |
-/// | `state:` | Type of the value carried across every row of one statement. | none |
-/// | `prerun:` | Function that allocates that value before the first row. | none |
-/// | `postrun:` | Function that runs teardown after the last row, before the SDK drops the state. | none |
+///
+/// # State keys
+///
+/// These change the code generated for the function, so they come in a fixed
+/// order, right after the signature and before any settings:
+/// `state:`, then `prerun:`, then optionally `postrun:`.
+///
+/// | Key | Meaning |
+/// |---|---|
+/// | `state:` | Type of the value carried across every row of one statement. |
+/// | `prerun:` | Function that allocates that value before the first row. |
+/// | `postrun:` | Function that runs teardown after the last row, before the SDK drops the state. |
 ///
 /// Set `deterministic: true` only for a pure function. The server refuses a
 /// non-deterministic VDF in a generated column or a `CHECK` constraint, so the flag
@@ -1747,12 +1777,67 @@ macro_rules! extension {
 /// See `examples/vsql_call_index` for the complete crate.
 #[macro_export]
 macro_rules! func {
+    // Forms are tried top to bottom, and each one's key list would also match
+    // the keys that pick a more specific form. So the most specific comes first:
+    // prerun + postrun, then prerun, then plain (last).
+
+    // Prerun and author postrun: state with custom teardown that runs before
+    // the automatic drop. `postrun:` names a fn(&mut State).
+    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
+     state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident
+     $(, $key:ident: $val:expr)*) => {{
+        $crate::paste::paste! {
+            unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
+            }
+            unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_prerun_args_t,
+                result: *mut $crate::sys::vef_prerun_result_t,
+            ) {
+                $crate::dispatch_prerun::<$state>($prerun, args, result);
+            }
+            unsafe extern "C" fn [< __vsql_postrun_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_postrun_args_t,
+                _result: *mut $crate::sys::vef_postrun_result_t,
+            ) {
+                $crate::dispatch_postrun_with_hook::<$state>($postrun, args);
+            }
+            static [< __VSQL_PARAMS_ $impl_fn:upper >]: &[$crate::Type] = &[$($param),*];
+            // `allow`: when an author gives every setting, `..DEFAULT` fills
+            // nothing, and clippy would warn in the author's crate.
+            #[allow(clippy::needless_update)]
+            let settings = $crate::FuncSettings {
+                $($key: $val,)*
+                ..$crate::FuncSettings::DEFAULT
+            };
+            $crate::FuncDescriptor {
+                sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: [< __VSQL_PARAMS_ $impl_fn:upper >],
+                returns: $ret,
+                trampoline: [< __vsql_trampoline_ $impl_fn >],
+                settings,
+                varargs: false,
+                prerun: Some([< __vsql_prerun_ $impl_fn >]),
+                postrun: Some([< __vsql_postrun_ $impl_fn >]),
+                clear: None,
+                accumulate: None,
+            }
+        }
+    }};
+
     // Prerun form: a function that owns per-statement state (setup in prerun,
     // auto-freed after the last row). `state:` names the state type. `prerun:`
-    // names the setup fn. See the arm below for an optional author `postrun:`
-    // hook that runs teardown just before auto-free.
+    // names the setup fn.
     ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     state: $state:ty,  prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
+     state: $state:ty, prerun: $prerun:ident
+     $(, $key:ident: $val:expr)*) => {{
         $crate::paste::paste! {
             // row trampoline borrows the state.
             unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
@@ -1779,65 +1864,20 @@ macro_rules! func {
                 $crate::dispatch_postrun::<$state>(args);
             }
             static [< __VSQL_PARAMS_ $impl_fn:upper >]: &[$crate::Type] = &[$($param),*];
+            // `allow`: when an author gives every setting, `..DEFAULT` fills
+            // nothing, and clippy would warn in the author's crate.
+            #[allow(clippy::needless_update)]
+            let settings = $crate::FuncSettings {
+                $($key: $val,)*
+                ..$crate::FuncSettings::DEFAULT
+            };
             $crate::FuncDescriptor {
                 sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
                     as *const ::std::os::raw::c_char,
                 params: [< __VSQL_PARAMS_ $impl_fn:upper >],
                 returns: $ret,
                 trampoline: [< __vsql_trampoline_ $impl_fn >],
-                buffer_size: $bs,
-                deterministic: $det,
-                varargs: false,
-                prerun: Some([< __vsql_prerun_ $impl_fn >]),
-                postrun: Some([< __vsql_postrun_ $impl_fn >]),
-                clear: None,
-                accumulate: None,
-            }
-        }
-     }};
-
-    // Prerun form, defaults: server buffer size, non-deterministic.
-    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     state: $state:ty, prerun: $prerun:ident) => {
-        $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
-            state: $state, prerun: $prerun, buffer_size: 0, deterministic: false)
-    };
-    // Prerun and author postrun: state with custom teardown that runs before
-    // the automatic drop. `postrun:` names a fn(&mut State).
-    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident,
-     buffer_size: $bs:expr, deterministic: $det:expr) => {{
-        $crate::paste::paste! {
-            unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
-                _ctx: *mut $crate::sys::vef_context_t,
-                args: *mut $crate::sys::vef_vdf_args_t,
-                result: *mut $crate::sys::vef_vdf_result_t,
-            ) {
-                $crate::dispatch_vdf_with_state::<$state>($impl_fn, args, result);
-            }
-            unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
-                _ctx: *mut $crate::sys::vef_context_t,
-                args: *mut $crate::sys::vef_prerun_args_t,
-                result: *mut $crate::sys::vef_prerun_result_t,
-            ) {
-                $crate::dispatch_prerun::<$state>($prerun, args, result);
-            }
-            unsafe extern "C" fn [< __vsql_postrun_ $impl_fn >](
-                _ctx: *mut $crate::sys::vef_context_t,
-                args: *mut $crate::sys::vef_postrun_args_t,
-                _result: *mut $crate::sys::vef_postrun_result_t,
-            ) {
-                $crate::dispatch_postrun_with_hook::<$state>($postrun, args);
-            }
-            static [< __VSQL_PARAMS_ $impl_fn:upper >]: &[$crate::Type] = &[$($param),*];
-            $crate::FuncDescriptor {
-                sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
-                    as *const ::std::os::raw::c_char,
-                params: [< __VSQL_PARAMS_ $impl_fn:upper >],
-                returns: $ret,
-                trampoline: [< __vsql_trampoline_ $impl_fn >],
-                buffer_size: $bs,
-                deterministic: $det,
+                settings,
                 varargs: false,
                 prerun: Some([< __vsql_prerun_ $impl_fn >]),
                 postrun: Some([< __vsql_postrun_ $impl_fn >]),
@@ -1847,18 +1887,12 @@ macro_rules! func {
         }
     }};
 
-    // Prerun and postrun, defaults (server buffer size, non-deterministic).
-    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-        state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident) => {
-            $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
-                state: $state, prerun: $prerun, postrun: $postrun,
-                buffer_size: 0, deterministic: false)
-    };
-    // Full form: declare the result-buffer size and determinism. `buffer_size`
-    // is a plain value (ideally computed from data, not a magic literal); 0
-    // uses the server default (256 bytes).
-    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     buffer_size: $bs:expr, deterministic: $det:expr) => {{
+    // Plain form: no per-statement state. Must stay LAST: its key list would
+    // also match `state: T, prerun: f`, so the stateful forms above must get
+    // the first chance. Any combination of setting keys works; each one left
+    // out takes its value from `FuncSettings::DEFAULT`.
+    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr
+     $(, $key:ident: $val:expr)*) => {{
         $crate::paste::paste! {
             unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
                 _ctx: *mut $crate::sys::vef_context_t,
@@ -1868,14 +1902,20 @@ macro_rules! func {
                 $crate::dispatch_vdf($impl_fn, args, result);
             }
             static [< __VSQL_PARAMS_ $impl_fn:upper >]: &[$crate::Type] = &[$($param),*];
+            // `allow`: when an author gives every setting, `..DEFAULT` fills
+            // nothing, and clippy would warn in the author's crate.
+            #[allow(clippy::needless_update)]
+            let settings = $crate::FuncSettings {
+                $($key: $val,)*
+                ..$crate::FuncSettings::DEFAULT
+            };
             $crate::FuncDescriptor {
                 sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
                     as *const ::std::os::raw::c_char,
                 params: [< __VSQL_PARAMS_ $impl_fn:upper >],
                 returns: $ret,
                 trampoline: [< __vsql_trampoline_ $impl_fn >],
-                buffer_size: $bs,
-                deterministic: $det,
+                settings,
                 varargs: false,
                 prerun: None,
                 postrun: None,
@@ -1884,22 +1924,6 @@ macro_rules! func {
             }
         }
     }};
-    // buffer_size only (determinism defaults to false).
-    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     buffer_size: $bs:expr) => {
-        $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
-            buffer_size: $bs, deterministic: false)
-    };
-    // deterministic only (buffer_size defaults to 0 = server default).
-    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     deterministic: $det:expr) => {
-        $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
-            buffer_size: 0, deterministic: $det)
-    };
-    ($impl_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr) => {
-        $crate::func!($impl_fn, $sql_name, [$($param),*] -> $ret,
-            buffer_size: 0, deterministic: false)
-    };
 }
 
 /// Declare an aggregate SQL function, in the shape of `SUM` or `COUNT`.
@@ -1936,8 +1960,8 @@ macro_rules! func {
 /// # let _ = d;
 /// ```
 ///
-/// `buffer_size:` and `deterministic:` may follow, meaning the same as in [`func!`],
-/// and both must be given together:
+/// Any combination of `buffer_size:` and `deterministic:` may follow, meaning the
+/// same as in [`func!`]:
 ///
 /// ```no_run
 /// # use villagesql::{InValue, VdfReturn};
@@ -1957,10 +1981,12 @@ macro_rules! func {
 /// See `examples/vsql_agg_sum` for the complete crate.
 #[macro_export]
 macro_rules! agg_func {
-    // Full form: result-buffer size and determinism specified.
+    // The only form: an aggregate always has state, clear and accumulate. Any
+    // combination of setting keys may follow; each one left out takes its
+    // value from `FuncSettings::DEFAULT`.
     ($result_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     state: $state:ty, clear: $clear:ident, accumulate: $accum:ident,
-     buffer_size: $bs:expr, deterministic: $det:expr) => {{
+     state: $state:ty, clear: $clear:ident, accumulate: $accum:ident
+     $(, $key:ident: $val:expr)*) => {{
         $crate::paste::paste! {
             // result trampoline: occupies the `vdf` slot. Called once per group.
             unsafe extern "C" fn [< __vsql_trampoline_ $result_fn >](
@@ -2003,14 +2029,20 @@ macro_rules! agg_func {
                 $crate::dispatch_accumulate::<$state>($accum, args, result);
             }
             static [< __VSQL_PARAMS_ $result_fn:upper >]: &[$crate::Type] = &[$($param),*];
+            // `allow`: when an author gives every setting, `..DEFAULT` fills
+            // nothing, and clippy would warn in the author's crate.
+            #[allow(clippy::needless_update)]
+            let settings = $crate::FuncSettings {
+                $($key: $val,)*
+                ..$crate::FuncSettings::DEFAULT
+            };
             $crate::FuncDescriptor {
                 sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
                     as *const ::std::os::raw::c_char,
                 params: [< __VSQL_PARAMS_ $result_fn:upper >],
                 returns: $ret,
                 trampoline: [< __vsql_trampoline_ $result_fn >],
-                buffer_size: $bs,
-                deterministic: $det,
+                settings,
                 varargs: false,
                 prerun: Some([< __vsql_agg_prerun_ $result_fn >]),
                 postrun: Some([< __vsql_postrun_ $result_fn >]),
@@ -2019,14 +2051,6 @@ macro_rules! agg_func {
             }
         }
     }};
-
-    // Shorthand: server-default buffer size, non-deterministic.
-    ($result_fn:ident, $sql_name:literal, [$($param:expr),* $(,)?] -> $ret:expr,
-     state: $state:ty, clear: $clear:ident, accumulate: $accum:ident) => {
-        $crate::agg_func!($result_fn, $sql_name, [$($param),*] -> $ret,
-            state: $state, clear: $clear, accumulate: $accum,
-            buffer_size: 0, deterministic: false)
-    };
 }
 
 /// Declare a VDF that accepts any number of arguments. The parameter list is
@@ -2046,8 +2070,8 @@ macro_rules! agg_func {
 /// | `prerun:` alone | The function validates its arguments but keeps nothing between rows |
 /// | Neither | The function accepts whatever it is given |
 ///
-/// Any form may end with `buffer_size:` and `deterministic:` together, meaning the
-/// same as in [`func!`].
+/// Any form may end with any combination of `buffer_size:` and `deterministic:`,
+/// meaning the same as in [`func!`].
 ///
 /// With `state:`, the row function takes `fn(&mut T, &[InValue]) -> VdfReturn`.
 /// Without it, `fn(&[InValue]) -> VdfReturn`. A `state:` form may also name
@@ -2090,10 +2114,14 @@ macro_rules! agg_func {
 /// See `examples/vsql_varargs` for the complete crate.
 #[macro_export]
 macro_rules! varargs_func {
-    // State and author postrun (full form).
+    // Forms are tried top to bottom, and each one's key list would also match
+    // the keys that pick a more specific form. So the most specific comes first:
+    // state + postrun, then state, then prerun only, then bare (last).
+
+    // State and author postrun.
     ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
-     state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident,
-     buffer_size: $bs:expr, deterministic: $det:expr) => {{
+     state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident
+     $(, $key:ident: $val:expr)*) => {{
         $crate::paste::paste! {
             unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
                 _ctx: *mut $crate::sys::vef_context_t,
@@ -2116,14 +2144,20 @@ macro_rules! varargs_func {
             ) {
                 $crate::dispatch_postrun_with_hook::<$state>($postrun, args);
             }
+            // `allow`: when an author gives every setting, `..DEFAULT` fills
+            // nothing, and clippy would warn in the author's crate.
+            #[allow(clippy::needless_update)]
+            let settings = $crate::FuncSettings {
+                $($key: $val,)*
+                ..$crate::FuncSettings::DEFAULT
+            };
             $crate::FuncDescriptor {
                 sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
                     as *const ::std::os::raw::c_char,
                 params: &[],
                 returns: $ret,
                 trampoline: [< __vsql_trampoline_ $impl_fn >],
-                buffer_size: $bs,
-                deterministic: $det,
+                settings,
                 varargs: true,
                 prerun: Some([< __vsql_prerun_ $impl_fn >]),
                 postrun: Some([< __vsql_postrun_ $impl_fn >]),
@@ -2133,16 +2167,10 @@ macro_rules! varargs_func {
         }
     }};
 
-    // State + author postrun (shorthand).
+    // State: prerun validates and sets up state; auto-dropped after the last row.
     ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
-     state: $state:ty, prerun: $prerun:ident, postrun: $postrun:ident) => {
-        $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
-            state: $state, prerun: $prerun, postrun: $postrun,
-            buffer_size: 0, deterministic: false)
-    };
-    // Full form: buffer size + determinism specified.
-    ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
-     state: $state:ty, prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
+     state: $state:ty, prerun: $prerun:ident
+     $(, $key:ident: $val:expr)*) => {{
         $crate::paste::paste! {
             // row trampoline borrows the state.
             unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
@@ -2168,14 +2196,20 @@ macro_rules! varargs_func {
             ) {
                 $crate::dispatch_postrun::<$state>(args);
             }
+            // `allow`: when an author gives every setting, `..DEFAULT` fills
+            // nothing, and clippy would warn in the author's crate.
+            #[allow(clippy::needless_update)]
+            let settings = $crate::FuncSettings {
+                $($key: $val,)*
+                ..$crate::FuncSettings::DEFAULT
+            };
             $crate::FuncDescriptor {
                 sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
                     as *const ::std::os::raw::c_char,
                 params: &[],
                 returns: $ret,
                 trampoline: [< __vsql_trampoline_ $impl_fn >],
-                buffer_size: $bs,
-                deterministic: $det,
+                settings,
                 varargs: true,
                 prerun: Some([< __vsql_prerun_ $impl_fn >]),
                 postrun: Some([< __vsql_postrun_ $impl_fn >]),
@@ -2185,89 +2219,83 @@ macro_rules! varargs_func {
         }
     }};
 
-    // Shorthand: server-default buffer size, non-deterministic.
+    // Prerun only: validation (+ optional buffer sizing), no state.
     ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
-     state: $state:ty, prerun: $prerun:ident) => {
-        $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
-            state: $state, prerun: $prerun, buffer_size: 0, deterministic: false)
-    };
-
-    // Prerun-only form: validation (+ optional buffer sizing), no state.
-    ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr,
-        prerun: $prerun:ident, buffer_size: $bs:expr, deterministic: $det:expr) => {{
-            $crate::paste::paste! {
-                // row trampoline: STATELESS. dispatch_vdf, not _with_state.
-                unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
-                    _ctx: *mut $crate::sys::vef_context_t,
-                    args: *mut $crate::sys::vef_vdf_args_t,
-                    result: *mut $crate::sys::vef_vdf_result_t,
-                ) {
-                    $crate::dispatch_vdf($impl_fn, args, result);
-                }
-                // prerun trampoline: validates only. State type is (). Nothing stored.
-                unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
-                    _ctx: *mut $crate::sys::vef_context_t,
-                    args: *mut $crate::sys::vef_prerun_args_t,
-                    result: *mut $crate::sys::vef_prerun_result_t,
-                ) {
-                    $crate::dispatch_prerun::<()>($prerun, args, result);
-                }
-                $crate::FuncDescriptor {
-                    sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
-                        as *const ::std::os::raw::c_char,
-                    params: &[],
-                    returns: $ret,
-                    trampoline: [< __vsql_trampoline_ $impl_fn >],
-                    buffer_size: $bs,
-                    deterministic: $det,
-                    varargs: true,
-                    prerun: Some([< __vsql_prerun_ $impl_fn >]),
-                    postrun: None,
-                    clear: None,
-                    accumulate: None,
-                }
+     prerun: $prerun:ident
+     $(, $key:ident: $val:expr)*) => {{
+        $crate::paste::paste! {
+            // row trampoline: STATELESS. dispatch_vdf, not _with_state.
+            unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_vdf($impl_fn, args, result);
             }
-        }};
-
-        // Prerun-only shorthand.
-        ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr, prerun: $prerun:ident) => {
-            $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
-                prerun: $prerun, buffer_size: 0, deterministic: false)
-        };
-
-        // Bare form: no prerun, no state, no validation (server-default buffer).
-        ($impl_fn: ident, $sql_name:literal, [..] -> $ret:expr,
-            buffer_size: $bs:expr, deterministic: $det:expr) => {{
-                $crate::paste::paste! {
-                    unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
-                        _ctx: *mut $crate::sys::vef_context_t,
-                        args: *mut $crate::sys::vef_vdf_args_t,
-                        result: *mut $crate::sys::vef_vdf_result_t,
-                    ) {
-                        $crate::dispatch_vdf($impl_fn, args, result);
-                    }
-                    $crate::FuncDescriptor {
-                        sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
-                            as *const ::std::os::raw::c_char,
-                        params: &[],
-                        returns: $ret,
-                        trampoline: [< __vsql_trampoline_ $impl_fn >],
-                        buffer_size: $bs,
-                        deterministic: $det,
-                        varargs: true,
-                        prerun: None,
-                        postrun: None,
-                        clear: None,
-                        accumulate: None,
-                    }
-                }
-            }};
-
-            // Bare shorthand.
-            ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr) => {
-                $crate::varargs_func!($impl_fn, $sql_name, [..] -> $ret,
-                    buffer_size: 0, deterministic: false)
+            // prerun trampoline: validates only. State type is (). Nothing stored.
+            unsafe extern "C" fn [< __vsql_prerun_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_prerun_args_t,
+                result: *mut $crate::sys::vef_prerun_result_t,
+            ) {
+                $crate::dispatch_prerun::<()>($prerun, args, result);
+            }
+            // `allow`: when an author gives every setting, `..DEFAULT` fills
+            // nothing, and clippy would warn in the author's crate.
+            #[allow(clippy::needless_update)]
+            let settings = $crate::FuncSettings {
+                $($key: $val,)*
+                ..$crate::FuncSettings::DEFAULT
             };
+            $crate::FuncDescriptor {
+                sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: &[],
+                returns: $ret,
+                trampoline: [< __vsql_trampoline_ $impl_fn >],
+                settings,
+                varargs: true,
+                prerun: Some([< __vsql_prerun_ $impl_fn >]),
+                postrun: None,
+                clear: None,
+                accumulate: None,
+            }
+        }
+    }};
+
+    // Bare: no prerun, no state, no validation. Must stay LAST.
+    ($impl_fn:ident, $sql_name:literal, [..] -> $ret:expr
+     $(, $key:ident: $val:expr)*) => {{
+        $crate::paste::paste! {
+            unsafe extern "C" fn [< __vsql_trampoline_ $impl_fn >](
+                _ctx: *mut $crate::sys::vef_context_t,
+                args: *mut $crate::sys::vef_vdf_args_t,
+                result: *mut $crate::sys::vef_vdf_result_t,
+            ) {
+                $crate::dispatch_vdf($impl_fn, args, result);
+            }
+            // `allow`: when an author gives every setting, `..DEFAULT` fills
+            // nothing, and clippy would warn in the author's crate.
+            #[allow(clippy::needless_update)]
+            let settings = $crate::FuncSettings {
+                $($key: $val,)*
+                ..$crate::FuncSettings::DEFAULT
+            };
+            $crate::FuncDescriptor {
+                sql_name: concat!($sql_name, "\0").as_bytes().as_ptr()
+                    as *const ::std::os::raw::c_char,
+                params: &[],
+                returns: $ret,
+                trampoline: [< __vsql_trampoline_ $impl_fn >],
+                settings,
+                varargs: true,
+                prerun: None,
+                postrun: None,
+                clear: None,
+                accumulate: None,
+            }
+        }
+    }};
 }
 
 /// Internal: emits the four shared VDFs (`from_string`/`to_string`/`compare`/`hash`)
@@ -2412,8 +2440,7 @@ macro_rules! __vsql_type_vdfs {
                 params: [< __VSQL_FROM_STRING_PARAMS_ $enc_fn:upper >],
                 returns: $crate::custom!($type_name),
                 trampoline: [< __vsql_trampoline_from_string_ $enc_fn >],
-                buffer_size: 0,
-                deterministic: true,
+                settings: $crate::FuncSettings { deterministic: true, ..$crate::FuncSettings::DEFAULT },
                 varargs: false,
                 prerun: None,
                 postrun: None,
@@ -2426,8 +2453,7 @@ macro_rules! __vsql_type_vdfs {
                 params: [< __VSQL_TO_STRING_PARAMS_ $dec_fn:upper >],
                 returns: $crate::Type::String,
                 trampoline: [< __vsql_trampoline_to_string_ $dec_fn >],
-                buffer_size: 0,
-                deterministic: true,
+                settings: $crate::FuncSettings { deterministic: true, ..$crate::FuncSettings::DEFAULT },
                 varargs: false,
                 prerun: None,
                 postrun: None,
@@ -2440,8 +2466,7 @@ macro_rules! __vsql_type_vdfs {
                 params: [< __VSQL_COMPARE_PARAMS_ $cmp_fn:upper >],
                 returns: $crate::Type::Int,
                 trampoline: [< __vsql_trampoline_compare_ $cmp_fn >],
-                buffer_size: 0,
-                deterministic: true,
+                settings: $crate::FuncSettings { deterministic: true, ..$crate::FuncSettings::DEFAULT },
                 varargs: false,
                 prerun: None,
                 postrun: None,
@@ -2455,8 +2480,7 @@ macro_rules! __vsql_type_vdfs {
                     params: [< __VSQL_HASH_PARAMS_ $hash_fn:upper >],
                     returns: $crate::Type::Int,
                     trampoline: [< __vsql_trampoline_hash_ $hash_fn >],
-                    buffer_size: 0,
-                    deterministic: true,
+                    settings: $crate::FuncSettings { deterministic: true, ..$crate::FuncSettings::DEFAULT },
                     varargs: false,
                     prerun: None,
                     postrun: None,
@@ -2471,8 +2495,7 @@ macro_rules! __vsql_type_vdfs {
                     params: [< __VSQL_INTRINSIC_DEFAULT_PARAMS_ $default_fn:upper >],
                     returns: $crate::Type::String,
                     trampoline: [< __vsql_trampoline_intrinsic_default_ $default_fn >],
-                    buffer_size: 0,
-                    deterministic: true,
+                    settings: $crate::FuncSettings { deterministic: true, ..$crate::FuncSettings::DEFAULT },
                     varargs: false,
                     prerun: None,
                     postrun: None,
@@ -2685,8 +2708,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 params: [< __VSQL_FROM_STRING_PARAMS_ $enc_fn:upper >],
                 returns: $crate::custom!($type_name),
                 trampoline: [< __vsql_trampoline_from_string_ $enc_fn >],
-                buffer_size: 0,
-                deterministic: true,
+                settings: $crate::FuncSettings { deterministic: true, ..$crate::FuncSettings::DEFAULT },
                 varargs: false,
                 prerun: None,
                 postrun: None,
@@ -2699,8 +2721,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 params: [< __VSQL_TO_STRING_PARAMS_ $dec_fn:upper >],
                 returns: $crate::Type::String,
                 trampoline: [< __vsql_trampoline_to_string_ $dec_fn >],
-                buffer_size: 0,
-                deterministic: true,
+                settings: $crate::FuncSettings { deterministic: true, ..$crate::FuncSettings::DEFAULT },
                 varargs: false,
                 prerun: None,
                 postrun: None,
@@ -2713,8 +2734,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 params: [< __VSQL_COMPARE_PARAMS_ $cmp_fn:upper >],
                 returns: $crate::Type::Int,
                 trampoline: [< __vsql_trampoline_compare_ $cmp_fn >],
-                buffer_size: 0,
-                deterministic: true,
+                settings: $crate::FuncSettings { deterministic: true, ..$crate::FuncSettings::DEFAULT },
                 varargs: false,
                 prerun: None,
                 postrun: None,
@@ -2728,8 +2748,7 @@ macro_rules! __vsql_type_vdfs_typed {
                     params: [< __VSQL_HASH_PARAMS_ $hash_fn:upper >],
                     returns: $crate::Type::Int,
                     trampoline: [< __vsql_trampoline_hash_ $hash_fn >],
-                    buffer_size: 0,
-                    deterministic: true,
+                    settings: $crate::FuncSettings { deterministic: true, ..$crate::FuncSettings::DEFAULT },
                     varargs: false,
                     prerun: None,
                     postrun: None,
@@ -2743,8 +2762,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 params: [< __VSQL_INT_TO_PARAMS_PARAMS_ $i2p_fn:upper >],
                 returns: $crate::Type::String,
                 trampoline: [< __vsql_trampoline_int_to_params_ $i2p_fn >],
-                buffer_size: 0,
-                deterministic: true,
+                settings: $crate::FuncSettings { deterministic: true, ..$crate::FuncSettings::DEFAULT },
                 varargs: false,
                 prerun: None,
                 postrun: None,
@@ -2757,8 +2775,7 @@ macro_rules! __vsql_type_vdfs_typed {
                 params: [< __VSQL_RESOLVE_PARAMS_PARAMS_ $rp_fn:upper >],
                 returns: $crate::Type::String,
                 trampoline: [< __vsql_trampoline_resolve_params_ $rp_fn >],
-                buffer_size: 0,
-                deterministic: true,
+                settings: $crate::FuncSettings { deterministic: true, ..$crate::FuncSettings::DEFAULT },
                 varargs: false,
                 prerun: None,
                 postrun: None,
@@ -2766,14 +2783,18 @@ macro_rules! __vsql_type_vdfs_typed {
                 accumulate: None,
             });
             $(
+                #[allow(clippy::needless_update)]
                 __embedded.push($crate::FuncDescriptor {
                     sql_name: concat!($type_name, "::intrinsic_default\0").as_bytes().as_ptr()
                         as *const ::std::os::raw::c_char,
                     params: [< __VSQL_INTRINSIC_DEFAULT_PARAMS_ $default_fn:upper >],
                     returns: $crate::Type::String,
                     trampoline: [< __vsql_trampoline_intrinsic_default_ $default_fn >],
-                    buffer_size: $max_dec,
-                    deterministic: true,
+                    settings: $crate::FuncSettings {
+                        buffer_size: $max_dec,
+                        deterministic: true,
+                        ..$crate::FuncSettings::DEFAULT
+                    },
                     varargs: false,
                     prerun: None,
                     postrun: None,
