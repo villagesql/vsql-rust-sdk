@@ -163,6 +163,9 @@ SELECT sdk_len_sum_clear_panic(text) from t1 GROUP BY text ORDER BY text;
 --error ER_UDF_ERROR
 SELECT sdk_len_sum_acc_panic(text) from t1;
 
+# TODO(villagessql-general): no prerun test or error
+#--echo #4. Panic: prerun use of T::default
+
 DROP TABLE t1;
 
 --source include/villagesql/decode_failure_log_end.inc
