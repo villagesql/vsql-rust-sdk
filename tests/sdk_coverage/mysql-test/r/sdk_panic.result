@@ -64,4 +64,26 @@ ERROR HY000: VDF error in function 'padint::hash': panic!() in dispatch_vdf
 # 9. Panic: within tvector_default
 CREATE TABLE tv_panic (id INT, tv sdk_coverage.tvector(13) NOT NULL);
 ERROR HY000: Type 'sdk_coverage.tvector(13)' failed to initialize: intrinsic_default function failed: panic!() in dispatch_intrinsic_default_typed
+# 1. Panic: stateless function (86 is panic)
+SELECT sdk_warn_if_negative(2);
+sdk_warn_if_negative(2)
+2
+SELECT sdk_warn_if_negative(86);
+ERROR HY000: VDF error in function 'sdk_warn_if_negative': panic!() in dispatch_vdf
+CREATE TABLE t (id INT);
+INSERT INTO t VALUES (1), (2), (3);
+# 2. Panic: function with state
+SELECT SUM(tracked_no_panic()) AS total FROM t;
+total
+6
+SELECT SUM(tracked_func_panic()) AS total FROM t;
+ERROR HY000: VDF error in function 'tracked_func_panic': panic!() in dispatch_vdf_with_state
+# 3. Panic: prerun
+SELECT SUM(tracked_prerun_panic()) AS total FROM t;
+ERROR HY000: Can't initialize function 'tracked_prerun_panic'; panic!() in dispatch_prerun
+# 4. Panic: postrun
+SELECT SUM(tracked_postrun_panic()) AS total FROM t;
+total
+6
+DROP TABLE t;
 UNINSTALL EXTENSION sdk_coverage;

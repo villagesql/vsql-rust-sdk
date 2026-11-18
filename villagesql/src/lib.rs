@@ -919,10 +919,16 @@ pub unsafe fn dispatch_prerun<T>(
     args: *mut vef_prerun_args_t,
     result: *mut vef_prerun_result_t,
 ) {
-    f(
-        PrerunArgs::from_raw(args),
-        PrerunResult::<T>::from_raw(result),
-    );
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        f(
+            PrerunArgs::from_raw(args),
+            PrerunResult::<T>::from_raw(result),
+        );
+    }));
+    if panic_result.is_err() {
+        let presult = PrerunResult::<T>::from_raw(result);
+        presult.error("panic!() in dispatch_prerun");
+    }
 }
 
 /// Row runner for functions that own per-statement state. Borrows the state
@@ -938,13 +944,16 @@ pub unsafe fn dispatch_vdf_with_state<T>(
     args: *mut vef_vdf_args_t,
     result: *mut vef_vdf_result_t,
 ) {
-    let args = &*args;
-    let state = borrow_state::<T>(args.user_data);
-    let ret = match read_in_values(args) {
-        Ok(in_values) => f(state, &in_values),
-        Err(msg) => VdfReturn::Error(msg),
-    };
-    write_result(ret, &mut *result);
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let args = &*args;
+        let state = borrow_state::<T>(args.user_data);
+        let ret = match read_in_values(args) {
+            Ok(in_values) => f(state, &in_values),
+            Err(msg) => VdfReturn::Error(msg),
+        };
+        write_result(ret, &mut *result);
+    }));
+    report_panic(&panic_result, "dispatch_vdf_with_state", &mut *result);
 }
 
 /// Postrun runner: reclaim the state and drop the state allocated in prerun.
@@ -961,10 +970,13 @@ pub unsafe fn dispatch_postrun<T>(args: *mut vef_postrun_args_t) {
 ///
 /// # Safety
 /// `args` is valid (set by prerun). `T` matches what prerun set.
+// TODO(villagesql-general): no error reporting on panic
 pub unsafe fn dispatch_postrun_with_hook<T>(f: fn(&mut T), args: *mut vef_postrun_args_t) {
     let raw = (*args).user_data;
     if !raw.is_null() {
-        f(borrow_state::<T>(raw));
+        let _panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            f(borrow_state::<T>(raw));
+        }));
     }
     reclaim_state::<T>(raw);
 }
