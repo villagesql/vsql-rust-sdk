@@ -985,11 +985,18 @@ pub unsafe fn dispatch_postrun_with_hook<T>(f: fn(&mut T), args: *mut vef_postru
 ///
 /// # Safety
 /// `result` must be valid for the duration of the call.
+// TODO(villagesql-general): no error reporting, no test
 pub unsafe fn dispatch_agg_prerun<T: Default>(
     _args: *mut vef_prerun_args_t,
     result: *mut vef_prerun_result_t,
 ) {
-    PrerunResult::<T>::from_raw(result).set_state(T::default());
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        PrerunResult::<T>::from_raw(result).set_state(T::default());
+    }));
+    if panic_result.is_err() {
+        let presult = PrerunResult::<T>::from_raw(result);
+        presult.error("panic!() in dispatch_agg_prerun");
+    }
 }
 
 /// Aggregate clear: reset the accumulator at the start of each group.
