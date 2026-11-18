@@ -863,6 +863,7 @@ fn str_arg(i: usize, bytes: &[u8]) -> Result<&str, String> {
 ///
 /// # Safety
 /// `args` and `result` must be valid for the duration of the call.
+#[doc(hidden)]
 pub unsafe fn dispatch_vdf(
     f: fn(&[InValue]) -> VdfReturn,
     args: *mut vef_vdf_args_t,
@@ -921,6 +922,7 @@ pub unsafe fn dispatch_from_string(
 ///
 /// # Safety
 /// `args` and `result` must be valid for the duration of the call.
+#[doc(hidden)]
 pub unsafe fn dispatch_prerun<T>(
     f: fn(PrerunArgs, PrerunResult<T>),
     args: *mut vef_prerun_args_t,
@@ -940,6 +942,7 @@ pub unsafe fn dispatch_prerun<T>(
 /// `args` and `result` are valid because state was set by a prior prerun.
 /// The state must have been set by a prior prerun, and `T` must watch that
 /// state's type.
+#[doc(hidden)]
 pub unsafe fn dispatch_vdf_with_state<T>(
     f: fn(&mut T, &[InValue]) -> VdfReturn,
     args: *mut vef_vdf_args_t,
@@ -958,6 +961,7 @@ pub unsafe fn dispatch_vdf_with_state<T>(
 ///
 /// # Safety
 /// `args` is valid (set by prerun). `T` matches what prerun set.
+#[doc(hidden)]
 pub unsafe fn dispatch_postrun<T>(args: *mut vef_postrun_args_t) {
     reclaim_state::<T>((*args).user_data);
 }
@@ -968,6 +972,7 @@ pub unsafe fn dispatch_postrun<T>(args: *mut vef_postrun_args_t) {
 ///
 /// # Safety
 /// `args` is valid (set by prerun). `T` matches what prerun set.
+#[doc(hidden)]
 pub unsafe fn dispatch_postrun_with_hook<T>(f: fn(&mut T), args: *mut vef_postrun_args_t) {
     let raw = (*args).user_data;
     if !raw.is_null() {
@@ -980,6 +985,7 @@ pub unsafe fn dispatch_postrun_with_hook<T>(f: fn(&mut T), args: *mut vef_postru
 ///
 /// # Safety
 /// `result` must be valid for the duration of the call.
+#[doc(hidden)]
 pub unsafe fn dispatch_agg_prerun<T: Default>(
     _args: *mut vef_prerun_args_t,
     result: *mut vef_prerun_result_t,
@@ -991,6 +997,7 @@ pub unsafe fn dispatch_agg_prerun<T: Default>(
 ///
 /// # Safety
 /// `args` is valid. Its `user_data` was set by a prior prerun. `T` matches.
+#[doc(hidden)]
 pub unsafe fn dispatch_clear<T>(f: fn(&mut T), args: *mut vef_vdf_args_t) {
     let state = borrow_state::<T>((*args).user_data);
     f(state);
@@ -1021,6 +1028,7 @@ pub unsafe fn dispatch_accumulate<T>(
 ///
 /// # Safety
 /// `args`/`result` are valid. `user_data` was set by a prior prerun. `T` matches.
+#[doc(hidden)]
 pub unsafe fn dispatch_agg_result<T>(
     f: fn(&T) -> VdfReturn,
     args: *mut vef_vdf_args_t,
@@ -1040,6 +1048,7 @@ pub unsafe fn dispatch_agg_result<T>(
 ///
 /// # Safety
 /// `args` and `result` must be valid for the duration of the call.
+#[doc(hidden)]
 pub unsafe fn dispatch_from_string_typed<P>(
     encode: fn(&str, &mut MaybeParams<P>) -> Result<Vec<u8>, String>,
     parse: fn(Params) -> P,
@@ -1167,6 +1176,7 @@ pub unsafe fn dispatch_from_string_typed<P>(
 /// `from_string` and caches the result.
 /// # Safety
 /// `result` must be valid for the duration of the call.
+#[doc(hidden)]
 pub unsafe fn dispatch_intrinsic_default_typed<P>(
     default_fn: fn(&P) -> Result<String, String>,
     parse: fn(Params) -> P,
@@ -1206,6 +1216,7 @@ pub unsafe fn dispatch_intrinsic_default_typed<P>(
 ///
 /// # Safety
 /// `result` must be valid for the duration of the call.
+#[doc(hidden)]
 pub unsafe fn dispatch_intrinsic_default(
     default_fn: fn() -> Result<String, String>,
     _args: *mut vef_vdf_args_t,
