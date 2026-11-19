@@ -168,5 +168,8 @@ SELECT sdk_len_sum_acc_panic(text) from t1;
 
 DROP TABLE t1;
 
+# Custom variable args functions
+#  No tests needed.  Previous tests cover all API calls.
+
 --source include/villagesql/decode_failure_log_end.inc
 UNINSTALL EXTENSION sdk_coverage;
