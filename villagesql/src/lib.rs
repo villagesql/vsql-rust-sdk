@@ -971,6 +971,7 @@ pub unsafe fn dispatch_postrun<T>(args: *mut vef_postrun_args_t) {
 /// # Safety
 /// `args` is valid (set by prerun). `T` matches what prerun set.
 // TODO(villagesql-general): no error reporting on postrun panic
+#[doc(hidden)]
 pub unsafe fn dispatch_postrun_with_hook<T>(f: fn(&mut T), args: *mut vef_postrun_args_t) {
     let raw = (*args).user_data;
     if !raw.is_null() {
@@ -986,6 +987,7 @@ pub unsafe fn dispatch_postrun_with_hook<T>(f: fn(&mut T), args: *mut vef_postru
 /// # Safety
 /// `result` must be valid for the duration of the call.
 // TODO(villagesql-general): no error reporting, no test
+#[doc(hidden)]
 pub unsafe fn dispatch_agg_prerun<T: Default>(
     _args: *mut vef_prerun_args_t,
     result: *mut vef_prerun_result_t,
@@ -1004,6 +1006,7 @@ pub unsafe fn dispatch_agg_prerun<T: Default>(
 /// # Safety
 /// `args` is valid. Its `user_data` was set by a prior prerun. `T` matches.
 // TODO(villagesql-general): no error reporting on clear panic
+#[doc(hidden)]
 pub unsafe fn dispatch_clear<T>(f: fn(&mut T), args: *mut vef_vdf_args_t) {
     let state = borrow_state::<T>((*args).user_data);
     let _panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
