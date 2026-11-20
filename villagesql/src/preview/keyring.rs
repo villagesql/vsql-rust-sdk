@@ -8,9 +8,10 @@
 
 use crate::preview::{Capability, RequiredCapability};
 use crate::sys::{
-    vef_keyring_result_t, vef_keyring_result_t_VEF_KEYRING_NOT_FOUND,
-    vef_keyring_result_t_VEF_KEYRING_OK, vef_keyring_result_t_VEF_KEYRING_UNAVAILABLE,
-    vef_preview_keyring_t, VEF_PREVIEW_KEYRING_ABI_VERSION, VEF_PREVIEW_KEYRING_NAME,
+    vef_keyring_result_t, vef_keyring_result_t_VEF_KEYRING_BUF_TOO_SMALL,
+    vef_keyring_result_t_VEF_KEYRING_NOT_FOUND, vef_keyring_result_t_VEF_KEYRING_OK,
+    vef_keyring_result_t_VEF_KEYRING_UNAVAILABLE, vef_preview_keyring_t,
+    VEF_PREVIEW_KEYRING_ABI_VERSION, VEF_PREVIEW_KEYRING_NAME,
 };
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -18,6 +19,14 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 // ABI version tag the server matches against (its `vef_preview_keyring_t` entry
 // is registered as "ver-1"). NUL-terminated; `strcmp`'d server-side.
 const VTABLE_HASH: &[u8] = b"ver-1\0";
+
+/// Starting buffer size, in bytes, for [`KeyringCapability::read_to_vec`].
+/// Matches the C++ SDK.
+pub const READ_INITIAL_CAPACITY: usize = 4096;
+
+/// Most server calls [`KeyringCapability::read_to_vec`] makes before giving up.
+/// Matches the C++ SDK.
+pub const READ_MAX_ATTEMPTS: usize = 3;
 
 /// Why a keyring operation failed.
 ///
@@ -32,17 +41,25 @@ pub enum KeyringError {
     CapabilityUnavailable,
     /// No keyring component is installed on the server (`VEF_KEYRING_UNAVAILABLE`).
     NoComponent,
+    /// The secret is larger than the buffer passed to
+    /// [`KeyringCapability::read`] (`VEF_KEYRING_BUF_TOO_SMALL`). `required` is
+    /// the buffer size, in bytes, the secret needs. Older servers report this
+    /// case as not-found instead.
+    BufferTooSmall { required: usize },
     /// Any other keyring failure (`VEF_KEYRING_ERROR`).
     Other,
 }
 
 impl std::fmt::Display for KeyringError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            KeyringError::CapabilityUnavailable => "keyring capability is unavailable",
-            KeyringError::NoComponent => "no keyring component is installed",
-            KeyringError::Other => "keyring operation failed",
-        })
+        match self {
+            KeyringError::CapabilityUnavailable => f.write_str("keyring capability is unavailable"),
+            KeyringError::NoComponent => f.write_str("no keyring component is installed"),
+            KeyringError::BufferTooSmall { required } => {
+                write!(f, "keyring secret needs a {required}-byte buffer")
+            }
+            KeyringError::Other => f.write_str("keyring operation failed"),
+        }
     }
 }
 
@@ -107,6 +124,9 @@ impl KeyringCapability {
     /// - [`KeyringError::CapabilityUnavailable`] if the capability was not wired
     ///   up (or its ABI is older than this SDK requires).
     /// - [`KeyringError::NoComponent`] if no keyring component is installed.
+    /// - [`KeyringError::BufferTooSmall`] if the secret does not fit in `buf`;
+    ///   `required` is the size to retry with. Pass an empty `buf` to query the
+    ///   size. Older servers return `Ok(None)` for this case instead.
     /// - [`KeyringError::Other`] for any other keyring failure.
     pub fn read(
         &self,
@@ -132,11 +152,53 @@ impl KeyringCapability {
                 &raw mut out_len,
             )
         };
+        // Checked here rather than in `interpret`, which never sees `out_len`.
+        if code == vef_keyring_result_t_VEF_KEYRING_BUF_TOO_SMALL {
+            return Err(KeyringError::BufferTooSmall { required: out_len });
+        }
         if interpret(code)? {
             Ok(Some(out_len.min(buf.len())))
         } else {
             Ok(None)
         }
+    }
+
+    /// Read a secret for `data_id` into a newly allocated `Vec`, growing the
+    /// buffer as needed.
+    ///
+    /// Starts with a [`READ_INITIAL_CAPACITY`]-byte buffer. If the server
+    /// reports [`KeyringError::BufferTooSmall`], it resizes to the required size
+    /// and retries, up to [`READ_MAX_ATTEMPTS`] calls in total (the secret can
+    /// change between calls). Matches the C++ SDK's `KeyringCapability::read`.
+    ///
+    /// # Returns
+    /// - `Ok(Some(secret))` — a secret was found.
+    /// - `Ok(None)` — no secret exists for `data_id`. Older servers also return
+    ///   this when the secret is larger than the initial buffer.
+    ///
+    /// # Errors
+    /// The same as [`KeyringCapability::read`], except that
+    /// [`KeyringError::BufferTooSmall`] is retried rather than returned. If the
+    /// secret still does not fit after the last attempt, returns
+    /// [`KeyringError::Other`].
+    pub fn read_to_vec(
+        &self,
+        data_id: &CStr,
+        auth_id: Option<&CStr>,
+    ) -> Result<Option<Vec<u8>>, KeyringError> {
+        let mut buf = vec![0u8; READ_INITIAL_CAPACITY];
+        for _ in 0..READ_MAX_ATTEMPTS {
+            match self.read(data_id, auth_id, &mut buf) {
+                Ok(Some(n)) => {
+                    buf.truncate(n);
+                    return Ok(Some(buf));
+                }
+                Ok(None) => return Ok(None),
+                Err(KeyringError::BufferTooSmall { required }) => buf.resize(required, 0),
+                Err(e) => return Err(e),
+            }
+        }
+        Err(KeyringError::Other)
     }
 
     /// Write a secret (`data`) to the keyring under `data_id`.

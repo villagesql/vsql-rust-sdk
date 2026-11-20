@@ -21,6 +21,24 @@ vsql_keyring.keyring_read('vsql_no_such_key', NULL) IS NULL
 SELECT vsql_keyring.keyring_read(NULL, NULL) IS NULL;
 vsql_keyring.keyring_read(NULL, NULL) IS NULL
 1
+# A 5000-byte secret doesn't fit read_to_vec's 4096-byte first read: the
+# server returns BUF_TOO_SMALL with the required size, and the SDK resizes and retries
+SELECT vsql_keyring.keyring_store('vsql_big_key', NULL, REPEAT('a', 5000));
+vsql_keyring.keyring_store('vsql_big_key', NULL, REPEAT('a', 5000))
+0
+SELECT LENGTH(vsql_keyring.keyring_read('vsql_big_key', NULL));
+LENGTH(vsql_keyring.keyring_read('vsql_big_key', NULL))
+5000
+SELECT vsql_keyring.keyring_read('vsql_big_key', NULL) = REPEAT('a', 5000);
+vsql_keyring.keyring_read('vsql_big_key', NULL) = REPEAT('a', 5000)
+1
+# A 9000-byte secret reads fine but doesn't fit keyring_read's 8192-byte
+# result buffer, so it is a SQL error rather than a truncated value
+SELECT vsql_keyring.keyring_store('vsql_huge_key', NULL, REPEAT('b', 9000));
+vsql_keyring.keyring_store('vsql_huge_key', NULL, REPEAT('b', 9000))
+0
+SELECT vsql_keyring.keyring_read('vsql_huge_key', NULL);
+ERROR HY000: VDF error in function 'keyring_read': result of 9000 bytes exceeds the 8192-byte buffer. Declare a larger buffer_size in func!
 UNINSTALL EXTENSION vsql_keyring;
 SET PERSIST vsql_allow_preview_extensions = OFF;
 RESET PERSIST vsql_allow_preview_extensions;
