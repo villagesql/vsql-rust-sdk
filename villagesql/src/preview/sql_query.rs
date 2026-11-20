@@ -322,7 +322,7 @@ pub enum DiagSeverity {
 /// out of server storage (owned), so a `Diag` outlives the `QueryResult`.
 #[derive(Debug, Clone)]
 pub struct Diag {
-    /// The MySQL error number, such as `1146` for an unknown table.
+    /// The `MySQL` error number, such as `1146` for an unknown table.
     pub errno: u32,
     /// Whether this is the statement's error, or a warning or note beside it.
     pub severity: DiagSeverity,

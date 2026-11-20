@@ -2,7 +2,7 @@
 name = "cargo-vsql"
 version = "0.0.7"
 edition = "2021"
-description = "Cargo subcommand for building, packaging, and testing VillageSQL extensions"
+description = "Cargo subcommand for building, packaging, testing, and inspecting VillageSQL extensions"
 license = "GPL-2.0-only"
 repository = "https://github.com/villagesql/vsql-rust-sdk"
 homepage = "https://github.com/villagesql/vsql-rust-sdk"
@@ -17,6 +17,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+libloading = "0.8"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tar = "0.4"
 toml = "0.8"
+villagesql-sys = { path = "../villagesql-sys", version = "0.0.7" }

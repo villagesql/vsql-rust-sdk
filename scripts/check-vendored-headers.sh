@@ -13,6 +13,9 @@
 # constant-fold and UINT_MAX folds differently on macOS and Linux. Any other
 # difference fails the job.
 #
+# A header the server ships that is in neither HEADERS nor NOT_VENDORED also
+# fails the job, so a new server header is a decision rather than a silent gap.
+#
 # Usage: check-vendored-headers.sh <server-source-dir>
 
 set -euo pipefail
@@ -29,6 +32,17 @@ HEADERS=(
   preview/keyring.h
   preview/thread_worker.h
   preview/sql_query.h
+)
+
+# Headers the server ships that the SDK deliberately doesn't vendor (yet). To start
+# vendoring one, move it to HEADERS and copy it into include/villagesql/abi/.
+NOT_VENDORED=(
+  preview/auth.h
+  preview/index.h
+  preview/mysql_services.h
+  preview/session_var.h
+  preview/statement_event.h
+  preview/storage.h
 )
 
 THEIRS="$SERVER_ROOT/villagesql/sdk/include/villagesql/abi"
@@ -73,6 +87,15 @@ for header in "${HEADERS[@]}"; do
   status=1
 done
 
+# Any server header that's in neither list is new: vendor it or add it to NOT_VENDORED.
+while IFS= read -r header; do
+  case " ${HEADERS[*]} ${NOT_VENDORED[*]} " in
+    *" $header "*) ;;
+    *) echo "FAIL $header — new on the server; vendor it (HEADERS) or list it in NOT_VENDORED"
+       status=1 ;;
+  esac
+done < <(cd "$THEIRS" && find . -name '*.h' | sed 's#^\./##' | sort)
+
 if [ "$status" -ne 0 ]; then
   cat >&2 <<'MSG'
 
@@ -84,6 +107,8 @@ To fix:
   3. Regenerate the bindings:
        cargo build -p villagesql-sys --features villagesql-sys/regenerate-bindings
   4. Every header comes from villagesql/sdk/include/villagesql/abi/.
+  5. If a new header was added to the server, either vendor it or add it to
+     NOT_VENDORED in this script.
 MSG
 fi
 

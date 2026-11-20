@@ -5,6 +5,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
+mod inspect;
+
 // Cargo dispatches `cargo vsql` to the `cargo-vsql` binary as:
 //   cargo-vsql vsql <subcommand> [args]
 // The outer `Cargo` enum absorbs the `vsql` token.
@@ -39,6 +41,8 @@ enum Cmd {
         #[arg(long)]
         record: bool,
     },
+    /// Load `.veb` archives and print the protocol, functions, types, and capabilities they register
+    Inspect(inspect::Opts),
 }
 
 #[derive(Deserialize)]
@@ -53,6 +57,12 @@ struct CargoPackage {
 
 fn main() -> Result<()> {
     let Cargo::Vsql(args) = Cargo::parse();
+
+    // `inspect` takes explicit paths; every other command works on the extension in the
+    // current directory.
+    if let Cmd::Inspect(opts) = &args.cmd {
+        return inspect::run(opts);
+    }
 
     let ext_dir = std::env::current_dir()?;
     let ext_name = extension_name(&ext_dir)?;
@@ -72,6 +82,7 @@ fn main() -> Result<()> {
             install(&ext_name, &veb)?;
             run_tests(&ext_dir, record)?;
         }
+        Cmd::Inspect(_) => unreachable!("handled above"),
     }
 
     Ok(())
