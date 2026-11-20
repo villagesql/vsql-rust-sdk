@@ -8,13 +8,12 @@
     clippy::must_use_candidate
 )]
 
-use villagesql::{InValue, MaybeParams, Params, Resolved, VdfReturn};
+use villagesql::{InValue, MaybeParams, Params, PrerunArgs, PrerunResult, Resolved, VdfReturn};
 
 // ── Identity functions ────────────────────────────────────────────────────────
 
 fn sdk_identity_int_impl(args: &[InValue]) -> VdfReturn {
     match args.first() {
-        Some(InValue::Int(v)) if *v == 86 => panic!("sdk_identity_int_impl panic"),
         Some(InValue::Int(v)) => VdfReturn::Int(*v),
         Some(InValue::Null) | None => VdfReturn::null(),
         _ => VdfReturn::error("sdk_identity_int: expected INT"),
@@ -33,6 +32,7 @@ fn sdk_identity_real_impl(args: &[InValue]) -> VdfReturn {
 
 fn sdk_warn_if_negative_impl(args: &[InValue]) -> VdfReturn {
     match args.first() {
+        Some(InValue::Int(v)) if *v == 86 => panic!("sdk_warn_if_negative_impl"),
         Some(InValue::Int(v)) if *v < 0 => {
             VdfReturn::warning(format!("sdk_warn_if_negative: {v} is negative"))
         }
@@ -40,6 +40,41 @@ fn sdk_warn_if_negative_impl(args: &[InValue]) -> VdfReturn {
         Some(InValue::Null) | None => VdfReturn::null(),
         _ => VdfReturn::error("sdk_warn_if_negative: expected INT"),
     }
+}
+
+// ── Stateful vdf returning count of rows ─────────────────────────────────────
+struct Tracked {
+    rows: i64,
+}
+
+/// prerun: allocate the state, record "prerun".
+fn tracked_prerun(_args: PrerunArgs, out: PrerunResult<Tracked>) {
+    out.set_state(Tracked { rows: 0 });
+}
+
+fn tracked_prerun_panic(_args: PrerunArgs, _out: PrerunResult<Tracked>) {
+    panic!("tracked_prerun_panic");
+}
+
+/// row: count this row, return the running count.
+fn tracked(state: &mut Tracked, _args: &[InValue]) -> VdfReturn {
+    state.rows += 1;
+    VdfReturn::int(state.rows)
+}
+
+fn tracked_panic(state: &mut Tracked, _args: &[InValue]) -> VdfReturn {
+    let _ = VdfReturn::int(state.rows);
+    panic!("tracked_panic");
+}
+
+/// author postrun: runs after the last row, before the drop. The state is
+/// still alive here, so we can read what the rows accumulated.
+fn tracked_postrun(_state: &mut Tracked) {
+    // do nothing
+}
+
+fn tracked_postrun_panic(_state: &mut Tracked) {
+    panic!("tracked_postrun_panic");
 }
 
 // ── Aggregate over STRING: total byte length ─────────────────────────────────
@@ -53,14 +88,26 @@ fn sdk_len_sum_clear(state: &mut LenSum) {
     state.total = 0;
 }
 
+fn sdk_len_sum_clear_panic(_state: &mut LenSum) {
+    panic!("sdk_len_sum_clear_panic");
+}
+
 fn sdk_len_sum_acc(state: &mut LenSum, args: &[InValue]) {
     if let Some(InValue::String(s)) = args.first() {
         state.total += i64::try_from(s.len()).unwrap_or(i64::MAX);
     }
 }
 
+fn sdk_len_sum_acc_panic(_state: &mut LenSum, _args: &[InValue]) {
+    panic!("sdk_len_sum_acc_panic");
+}
+
 fn sdk_len_sum_result(state: &LenSum) -> VdfReturn {
     VdfReturn::int(state.total)
+}
+
+fn sdk_len_sum_result_panic(_state: &LenSum) -> VdfReturn {
+    panic!("sdk_len_sum_result_panic");
 }
 
 // ── Type 1: counter (wraps i64, decimal string representation) ────────────────
@@ -407,6 +454,23 @@ villagesql::extension! {
         villagesql::agg_func!(sdk_len_sum_result, "sdk_len_sum",
             [villagesql::Type::String] -> villagesql::Type::Int,
             state: LenSum, clear: sdk_len_sum_clear, accumulate: sdk_len_sum_acc),
+        villagesql::agg_func!(sdk_len_sum_result_panic, "sdk_len_sum_result_panic",
+            [villagesql::Type::String] -> villagesql::Type::Int,
+            state: LenSum, clear: sdk_len_sum_clear, accumulate: sdk_len_sum_acc),
+        villagesql::agg_func!(sdk_len_sum_result, "sdk_len_sum_acc_panic",
+            [villagesql::Type::String] -> villagesql::Type::Int,
+            state: LenSum, clear: sdk_len_sum_clear, accumulate: sdk_len_sum_acc_panic),
+        villagesql::agg_func!(sdk_len_sum_result, "sdk_len_sum_clear_panic",
+            [villagesql::Type::String] -> villagesql::Type::Int,
+            state: LenSum, clear: sdk_len_sum_clear_panic, accumulate: sdk_len_sum_acc),
+        villagesql::func!(tracked, "tracked_no_panic", [] -> villagesql::Type::Int,
+            state: Tracked, prerun: tracked_prerun, postrun: tracked_postrun),
+        villagesql::func!(tracked, "tracked_prerun_panic", [] -> villagesql::Type::Int,
+            state: Tracked, prerun: tracked_prerun_panic, postrun: tracked_postrun),
+        villagesql::func!(tracked_panic, "tracked_func_panic", [] -> villagesql::Type::Int,
+            state: Tracked, prerun: tracked_prerun, postrun: tracked_postrun),
+        villagesql::func!(tracked, "tracked_postrun_panic", [] -> villagesql::Type::Int,
+            state: Tracked, prerun: tracked_prerun, postrun: tracked_postrun_panic),
     ],
     types: [
         villagesql::custom_type!(

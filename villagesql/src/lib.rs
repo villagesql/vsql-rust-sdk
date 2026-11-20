@@ -796,7 +796,8 @@ unsafe fn reclaim_state<T>(raw: *mut c_void) {
     if raw.is_null() {
         return;
     }
-    drop(Box::from_raw(raw.cast::<T>()));
+    let state = Box::from_raw(raw.cast::<T>());
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| drop(state)));
 }
 
 /// Helper to convert raw Protocol-3 VDF arguments into a `&[InValue]` slice.
@@ -859,6 +860,17 @@ fn str_arg(i: usize, bytes: &[u8]) -> Result<&str, String> {
     })
 }
 
+/// Turn a caught panic into an SQL error on result.
+unsafe fn report_panic(
+    caught: &std::thread::Result<()>,
+    name: &str,
+    result: &mut vef_vdf_result_t,
+) {
+    if caught.is_err() {
+        write_result(VdfReturn::Error(format!("panic!() in {name}")), result);
+    }
+}
+
 /// Convert raw Protocol-3 VDF arguments into a `&[InValue]` slice and call `f`.
 ///
 /// # Safety
@@ -876,16 +888,7 @@ pub unsafe fn dispatch_vdf(
         };
         write_result(ret, &mut *result);
     }));
-
-    match panic_result {
-        Ok(()) => (),
-        Err(_) => {
-            write_result(
-                VdfReturn::Error("panic!() in dispatch_vdf".to_string()),
-                &mut *result,
-            );
-        }
-    }
+    report_panic(&panic_result, "dispatch_vdf", &mut *result);
 }
 
 /// [`dispatch_vdf`] for a type's `from_string`: invalid UTF-8 is a bad value,
@@ -906,16 +909,7 @@ pub unsafe fn dispatch_from_string(
         };
         write_result(ret, &mut *result);
     }));
-
-    match panic_result {
-        Ok(()) => (),
-        Err(_) => {
-            write_result(
-                VdfReturn::Error("panic!() in dispatch_from_string".to_string()),
-                &mut *result,
-            );
-        }
-    }
+    report_panic(&panic_result, "dispatch_from_string", &mut *result);
 }
 
 /// Prerun runner: wrap the raw slots and call the author's setup fn.
@@ -928,10 +922,16 @@ pub unsafe fn dispatch_prerun<T>(
     args: *mut vef_prerun_args_t,
     result: *mut vef_prerun_result_t,
 ) {
-    f(
-        PrerunArgs::from_raw(args),
-        PrerunResult::<T>::from_raw(result),
-    );
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        f(
+            PrerunArgs::from_raw(args),
+            PrerunResult::<T>::from_raw(result),
+        );
+    }));
+    if panic_result.is_err() {
+        let presult = PrerunResult::<T>::from_raw(result);
+        presult.error("panic!() in dispatch_prerun");
+    }
 }
 
 /// Row runner for functions that own per-statement state. Borrows the state
@@ -948,13 +948,16 @@ pub unsafe fn dispatch_vdf_with_state<T>(
     args: *mut vef_vdf_args_t,
     result: *mut vef_vdf_result_t,
 ) {
-    let args = &*args;
-    let state = borrow_state::<T>(args.user_data);
-    let ret = match read_in_values(args) {
-        Ok(in_values) => f(state, &in_values),
-        Err(msg) => VdfReturn::Error(msg),
-    };
-    write_result(ret, &mut *result);
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let args = &*args;
+        let state = borrow_state::<T>(args.user_data);
+        let ret = match read_in_values(args) {
+            Ok(in_values) => f(state, &in_values),
+            Err(msg) => VdfReturn::Error(msg),
+        };
+        write_result(ret, &mut *result);
+    }));
+    report_panic(&panic_result, "dispatch_vdf_with_state", &mut *result);
 }
 
 /// Postrun runner: reclaim the state and drop the state allocated in prerun.
@@ -972,11 +975,14 @@ pub unsafe fn dispatch_postrun<T>(args: *mut vef_postrun_args_t) {
 ///
 /// # Safety
 /// `args` is valid (set by prerun). `T` matches what prerun set.
+// TODO(villagesql-general): no error reporting on postrun panic
 #[doc(hidden)]
 pub unsafe fn dispatch_postrun_with_hook<T>(f: fn(&mut T), args: *mut vef_postrun_args_t) {
     let raw = (*args).user_data;
     if !raw.is_null() {
-        f(borrow_state::<T>(raw));
+        let _panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            f(borrow_state::<T>(raw));
+        }));
     }
     reclaim_state::<T>(raw);
 }
@@ -985,22 +991,32 @@ pub unsafe fn dispatch_postrun_with_hook<T>(f: fn(&mut T), args: *mut vef_postru
 ///
 /// # Safety
 /// `result` must be valid for the duration of the call.
+// TODO(villagesql-general): no error reporting, no test
 #[doc(hidden)]
 pub unsafe fn dispatch_agg_prerun<T: Default>(
     _args: *mut vef_prerun_args_t,
     result: *mut vef_prerun_result_t,
 ) {
-    PrerunResult::<T>::from_raw(result).set_state(T::default());
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        PrerunResult::<T>::from_raw(result).set_state(T::default());
+    }));
+    if panic_result.is_err() {
+        let presult = PrerunResult::<T>::from_raw(result);
+        presult.error("panic!() in dispatch_agg_prerun");
+    }
 }
 
 /// Aggregate clear: reset the accumulator at the start of each group.
 ///
 /// # Safety
 /// `args` is valid. Its `user_data` was set by a prior prerun. `T` matches.
+// TODO(villagesql-general): no error reporting on clear panic
 #[doc(hidden)]
 pub unsafe fn dispatch_clear<T>(f: fn(&mut T), args: *mut vef_vdf_args_t) {
     let state = borrow_state::<T>((*args).user_data);
-    f(state);
+    let _panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        f(state);
+    }));
 }
 
 /// Aggregate accumulate: fold one row into the accumulator. The author's
@@ -1015,12 +1031,15 @@ pub unsafe fn dispatch_accumulate<T>(
     args: *mut vef_vdf_args_t,
     result: *mut vef_vdf_result_t,
 ) {
-    let args = &*args;
-    let state = borrow_state::<T>(args.user_data);
-    match read_in_values(args) {
-        Ok(in_values) => f(state, &in_values),
-        Err(msg) => write_result(VdfReturn::Error(msg), &mut *result),
-    }
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let args = &*args;
+        let state = borrow_state::<T>(args.user_data);
+        match read_in_values(args) {
+            Ok(in_values) => f(state, &in_values),
+            Err(msg) => write_result(VdfReturn::Error(msg), &mut *result),
+        }
+    }));
+    report_panic(&panic_result, "dispatch_accumulate", &mut *result);
 }
 
 /// Aggregate result: produce the group's output from the finished accumulator.
@@ -1034,8 +1053,11 @@ pub unsafe fn dispatch_agg_result<T>(
     args: *mut vef_vdf_args_t,
     result: *mut vef_vdf_result_t,
 ) {
-    let state = borrow_state::<T>((*args).user_data);
-    write_result(f(state), &mut *result);
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let state = borrow_state::<T>((*args).user_data);
+        write_result(f(state), &mut *result);
+    }));
+    report_panic(&panic_result, "dispatch_agg_result", &mut *result);
 }
 
 /// Dispatch a parameterized type's `from_string` (encode), including the
@@ -1104,16 +1126,7 @@ pub unsafe fn dispatch_from_string_typed<P>(
             maybe = MaybeParams::present(parse(Params::parse(&key)));
         }
     }));
-
-    match panic_result1 {
-        Ok(()) => (),
-        Err(_) => {
-            write_result(
-                VdfReturn::Error("panic!() in dispatch_from_string_typed_1".to_string()),
-                &mut *result,
-            );
-        }
-    }
+    report_panic(&panic_result1, "dispatch_from_string_typed_1", &mut *result);
 
     // Run the author's encoder. When params were unknown, this is where it
     // inspects the string and fills them in via `set`. An `Err` is a bad value,
@@ -1127,16 +1140,7 @@ pub unsafe fn dispatch_from_string_typed<P>(
             };
             write_result(ret, result);
         }));
-
-        match panic_result2 {
-            Ok(()) => (),
-            Err(_) => {
-                write_result(
-                    VdfReturn::Error("panic!() in dispatch_from_string_typed_2".to_string()),
-                    &mut *result,
-                );
-            }
-        }
+        report_panic(&panic_result2, "dispatch_from_string_typed_2", &mut *result);
     }
 
     // If the author inferred params (and the server gave us a buffer for them),
@@ -1156,16 +1160,7 @@ pub unsafe fn dispatch_from_string_typed<P>(
                 out.actual_len = needed;
                 out.overflow = overflow;
             }));
-
-            match panic_result3 {
-                Ok(()) => (),
-                Err(_) => {
-                    write_result(
-                        VdfReturn::Error("panic!() in dispatch_from_string_typed_3".to_string()),
-                        &mut *result,
-                    );
-                }
-            }
+            report_panic(&panic_result3, "dispatch_from_string_typed_3", &mut *result);
         }
     }
 }
@@ -1198,16 +1193,11 @@ pub unsafe fn dispatch_intrinsic_default_typed<P>(
         };
         write_result(ret, result);
     }));
-
-    match panic_result {
-        Ok(()) => (),
-        Err(_) => {
-            write_result(
-                VdfReturn::Error("panic!() in dispatch_intrinsic_default_typed".to_string()),
-                &mut *result,
-            );
-        }
-    }
+    report_panic(
+        &panic_result,
+        "dispatch_intrinsic_default_typed",
+        &mut *result,
+    );
 }
 
 /// Dispatch a non-parameterized type's intrinsic-default VDF. Compute the
@@ -1232,16 +1222,7 @@ pub unsafe fn dispatch_intrinsic_default(
 
         write_result(ret, result);
     }));
-
-    match panic_result {
-        Ok(()) => (),
-        Err(_) => {
-            write_result(
-                VdfReturn::Error("panic!() in dispatch_vdf_intrinsic_default".to_string()),
-                &mut *result,
-            );
-        }
-    }
+    report_panic(&panic_result, "dispatch_intrinsic_default", &mut *result);
 }
 
 /// Copy `bytes` into the server's result buffer `buf` (capacity `max`) and mark

@@ -26,7 +26,7 @@ sum(id)	c
 DROP TABLE t1;
 # 5. Panic: within counter_panic_default
 CREATE TABLE t_panic (id INT, c counter_panic_default NOT NULL, f flag);
-ERROR HY000: Type 'sdk_coverage.counter_panic_default' failed to initialize: intrinsic_default function failed: panic!() in dispatch_vdf_intrinsic_default
+ERROR HY000: Type 'sdk_coverage.counter_panic_default' failed to initialize: intrinsic_default function failed: panic!() in dispatch_intrinsic_default
 # 1. Panic: within padint_encode
 SELECT padint::from_string('86');
 ERROR HY000: error encountered during padint::from_string inference: panic!() in dispatch_from_string_typed_2
@@ -64,4 +64,48 @@ ERROR HY000: VDF error in function 'padint::hash': panic!() in dispatch_vdf
 # 9. Panic: within tvector_default
 CREATE TABLE tv_panic (id INT, tv sdk_coverage.tvector(13) NOT NULL);
 ERROR HY000: Type 'sdk_coverage.tvector(13)' failed to initialize: intrinsic_default function failed: panic!() in dispatch_intrinsic_default_typed
+# 1. Panic: stateless function (86 is panic)
+SELECT sdk_warn_if_negative(2);
+sdk_warn_if_negative(2)
+2
+SELECT sdk_warn_if_negative(86);
+ERROR HY000: VDF error in function 'sdk_warn_if_negative': panic!() in dispatch_vdf
+CREATE TABLE t (id INT);
+INSERT INTO t VALUES (1), (2), (3);
+# 2. Panic: function with state
+SELECT SUM(tracked_no_panic()) AS total FROM t;
+total
+6
+SELECT SUM(tracked_func_panic()) AS total FROM t;
+ERROR HY000: VDF error in function 'tracked_func_panic': panic!() in dispatch_vdf_with_state
+# 3. Panic: prerun
+SELECT SUM(tracked_prerun_panic()) AS total FROM t;
+ERROR HY000: Can't initialize function 'tracked_prerun_panic'; panic!() in dispatch_prerun
+# 4. Panic: postrun
+SELECT SUM(tracked_postrun_panic()) AS total FROM t;
+total
+6
+DROP TABLE t;
+#1. Panic: result function
+SELECT sdk_len_sum(s) FROM (VALUES ROW('12'), ROW('34'), ROW('56')) AS t(s);
+sdk_len_sum(s)
+6
+SELECT sdk_len_sum_result_panic(s) FROM (VALUES ROW('12'), ROW('34'), ROW('56')) AS t(s);
+ERROR HY000: VDF error in function 'sdk_len_sum_result_panic': panic!() in dispatch_agg_result
+CREATE TABLE t1 (id INT, text VARCHAR(4));
+INSERT INTO t1 VALUES (1, '12'), (2, '34'), (3, '12'), (4, '12');
+#2. Panic: clear (first without panic)
+SELECT sdk_len_sum(text) from t1 GROUP BY text ORDER BY text;
+sdk_len_sum(text)
+6
+2
+(second with panic and wrong values)
+SELECT sdk_len_sum_clear_panic(text) from t1 GROUP BY text ORDER BY text;
+sdk_len_sum_clear_panic(text)
+6
+8
+#3. Panic: accumulate
+SELECT sdk_len_sum_acc_panic(text) from t1;
+ERROR HY000: VDF error in function 'sdk_len_sum_acc_panic': panic!() in dispatch_accumulate
+DROP TABLE t1;
 UNINSTALL EXTENSION sdk_coverage;
