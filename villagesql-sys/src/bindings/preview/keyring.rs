@@ -6,6 +6,7 @@ pub const vef_keyring_result_t_VEF_KEYRING_OK: vef_keyring_result_t = 0;
 pub const vef_keyring_result_t_VEF_KEYRING_NOT_FOUND: vef_keyring_result_t = 1;
 pub const vef_keyring_result_t_VEF_KEYRING_UNAVAILABLE: vef_keyring_result_t = 2;
 pub const vef_keyring_result_t_VEF_KEYRING_ERROR: vef_keyring_result_t = 3;
+pub const vef_keyring_result_t_VEF_KEYRING_BUF_TOO_SMALL: vef_keyring_result_t = 4;
 pub type vef_keyring_result_t = ::std::os::raw::c_uint;
 pub type vef_read_keyring_fn = ::std::option::Option<
     unsafe extern "C" fn(

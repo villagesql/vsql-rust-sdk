@@ -2,7 +2,7 @@
 //!
 //! Exposes two SQL functions backed by the Rust keyring accessors:
 //! * `keyring_store(data_id, auth_id, value)` — write a secret via `KEYRING.write`
-//! * `keyring_read(data_id, auth_id)` — read it back via `KEYRING.read`
+//! * `keyring_read(data_id, auth_id)` — read it back via `KEYRING.read_to_vec`
 //!
 //! Requires a `MySQL` keyring component (e.g. `component_keyring_file`) on the server.
 //!
@@ -19,13 +19,12 @@ use villagesql::{InValue, VdfReturn};
 /// The keyring capability instance, declared `static` for the extension's life.
 static KEYRING: KeyringCapability = KeyringCapability::new();
 
-/// Largest secret this example can read back. The `MySQL` keyring has no
-/// size-probe: `read_keyring` returns `NOT_FOUND` (not the real length) when a
-/// secret is bigger than the buffer we hand it, so a fixed cap is the best this
-/// ABI allows — a larger secret reads back as SQL NULL. Kept in sync with
-/// `keyring_read`'s `buffer_size` so anything that fits the read buffer also
-/// fits the SQL result buffer.
-const MAX_SECRET_LEN: usize = 1024;
+/// Size of `keyring_read`'s SQL result buffer. `read_to_vec` reads a secret of
+/// any size, but the result buffer is fixed when the function is registered, so a
+/// secret longer than this is returned as a SQL error rather than truncated.
+/// Larger than `read_to_vec`'s 4096-byte first read, so the MTR test can return
+/// a secret that needed a resize and retry.
+const MAX_RESULT_LEN: usize = 8192;
 
 /// A STRING argument as an owned C string. `None` for SQL NULL, a missing arg,
 /// a non-string, or a string with an interior NUL (which can't be a C string).
@@ -60,17 +59,17 @@ fn keyring_store_impl(args: &[InValue]) -> VdfReturn {
 ///
 /// Reads the secret stored under `data_id`. Returns the value on success, or NULL
 /// if `data_id` is missing/NULL, the key doesn't exist, the capability is
-/// unavailable, or the secret isn't valid UTF-8 text.
+/// unavailable, or the secret isn't valid UTF-8 text. A secret longer than
+/// [`MAX_RESULT_LEN`] is a SQL error.
 fn keyring_read_impl(args: &[InValue]) -> VdfReturn {
     let Some(data_id) = arg_cstr(args.first()) else {
         return VdfReturn::null();
     };
     let auth_id = arg_cstr(args.get(1));
 
-    let mut buf = [0u8; MAX_SECRET_LEN];
-    match KEYRING.read(&data_id, auth_id.as_deref(), &mut buf) {
-        Ok(Some(n)) => match std::str::from_utf8(&buf[..n]) {
-            Ok(s) => VdfReturn::string(s),
+    match KEYRING.read_to_vec(&data_id, auth_id.as_deref()) {
+        Ok(Some(secret)) => match String::from_utf8(secret) {
+            Ok(s) => VdfReturn::String(s),
             Err(_) => VdfReturn::null(),
         },
         Ok(None) | Err(_) => VdfReturn::null(),
@@ -87,7 +86,7 @@ villagesql::extension! {
         villagesql::func!(
             keyring_read_impl, "keyring_read",
             [villagesql::Type::String, villagesql::Type::String] -> villagesql::Type::String,
-            buffer_size: MAX_SECRET_LEN
+            buffer_size: MAX_RESULT_LEN
         ),
     ],
     requires: [
