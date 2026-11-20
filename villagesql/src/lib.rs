@@ -796,11 +796,6 @@ unsafe fn reclaim_state<T>(raw: *mut c_void) {
     if raw.is_null() {
         return;
     }
-    drop(Box::from_raw(raw.cast::<T>()));
-unsafe fn reclaim_state<T>(raw: *mut c_void) {
-    if raw.is_null() {
-        return;
-    }
     let state = Box::from_raw(raw.cast::<T>());
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| drop(state)));
 }
