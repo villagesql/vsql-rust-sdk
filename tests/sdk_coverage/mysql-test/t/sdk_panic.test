@@ -132,7 +132,7 @@ SELECT SUM(tracked_func_panic()) AS total FROM t;
 --error ER_CANT_INITIALIZE_UDF
 SELECT SUM(tracked_prerun_panic()) AS total FROM t;
 
-# TODO(villagessql-general): no postrun error reporting
+# TODO(villagesql-general): no postrun error reporting
 --echo # 4. Panic: postrun
 SELECT SUM(tracked_postrun_panic()) AS total FROM t;
 
@@ -153,7 +153,7 @@ SELECT sdk_len_sum_result_panic(s) FROM (VALUES ROW('12'), ROW('34'), ROW('56'))
 CREATE TABLE t1 (id INT, text VARCHAR(4));
 INSERT INTO t1 VALUES (1, '12'), (2, '34'), (3, '12'), (4, '12');
 
-# TODO(villagessql-general): no clear error reporting
+# TODO(villagesql-general): no clear error reporting
 --echo #2. Panic: clear (first without panic)
 SELECT sdk_len_sum(text) from t1 GROUP BY text ORDER BY text;
 --echo                  (second with panic and wrong values)
@@ -163,7 +163,7 @@ SELECT sdk_len_sum_clear_panic(text) from t1 GROUP BY text ORDER BY text;
 --error ER_UDF_ERROR
 SELECT sdk_len_sum_acc_panic(text) from t1;
 
-# TODO(villagessql-general): no prerun test or error
+# TODO(villagesql-general): no prerun test or error
 #--echo #4. Panic: prerun use of T::default
 
 DROP TABLE t1;
