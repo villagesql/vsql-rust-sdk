@@ -39,6 +39,18 @@ SELECT vsql_keyring.keyring_read('vsql_no_such_key', NULL) IS NULL;
 --echo # A NULL data_id reads back as NULL
 SELECT vsql_keyring.keyring_read(NULL, NULL) IS NULL;
 
+--echo # A 5000-byte secret doesn't fit read_to_vec's 4096-byte first read: the
+--echo # server returns BUF_TOO_SMALL with the required size, and the SDK resizes and retries
+SELECT vsql_keyring.keyring_store('vsql_big_key', NULL, REPEAT('a', 5000));
+SELECT LENGTH(vsql_keyring.keyring_read('vsql_big_key', NULL));
+SELECT vsql_keyring.keyring_read('vsql_big_key', NULL) = REPEAT('a', 5000);
+
+--echo # A 9000-byte secret reads fine but doesn't fit keyring_read's 8192-byte
+--echo # result buffer, so it is a SQL error rather than a truncated value
+SELECT vsql_keyring.keyring_store('vsql_huge_key', NULL, REPEAT('b', 9000));
+--error ER_UDF_ERROR
+SELECT vsql_keyring.keyring_read('vsql_huge_key', NULL);
+
 UNINSTALL EXTENSION vsql_keyring;
 
 SET PERSIST vsql_allow_preview_extensions = OFF;
