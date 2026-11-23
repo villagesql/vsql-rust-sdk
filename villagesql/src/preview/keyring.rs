@@ -28,12 +28,19 @@ pub const READ_INITIAL_CAPACITY: usize = 4096;
 /// Matches the C++ SDK.
 pub const READ_MAX_ATTEMPTS: usize = 3;
 
-/// Why a keyring operation failed.
+/// Why a keyring operation did not succeed.
 ///
 /// Success is reported on the `Ok` side of the returned [`Result`] (`()` for
-/// [`KeyringCapability::write`], a `bool` "was it found?" for
-/// [`KeyringCapability::read`]), so this enum lists only genuine failures
+/// [`KeyringCapability::write`], an `Option<usize>` for
+/// [`KeyringCapability::read`], `None` meaning not found). Most variants are
+/// failures, but [`KeyringError::BufferTooSmall`] is recoverable: retry with a
+/// buffer of at least `required` bytes, or use
+/// [`KeyringCapability::read_to_vec`], which does this for you.
+///
+/// New variants may be added in future releases, so `match` on this enum
+/// must include a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KeyringError {
     /// The capability was not wired up: the server never populated the vtable,
     /// its function pointer is null, or its ABI version is older than this SDK
