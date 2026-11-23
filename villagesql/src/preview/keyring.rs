@@ -178,8 +178,10 @@ impl KeyringCapability {
     ///
     /// # Errors
     /// The same as [`KeyringCapability::read`], except that
-    /// [`KeyringError::BufferTooSmall`] is retried rather than returned. If the
-    /// secret still does not fit after the last attempt, returns
+    /// [`KeyringError::BufferTooSmall`] is normally retried rather than
+    /// returned. It is returned only if the reported `required` size would not
+    /// grow the buffer, or if allocating `required` bytes fails. If the secret
+    /// still does not fit after the last attempt, returns
     /// [`KeyringError::Other`].
     pub fn read_to_vec(
         &self,
@@ -194,7 +196,15 @@ impl KeyringCapability {
                     return Ok(Some(buf));
                 }
                 Ok(None) => return Ok(None),
-                Err(KeyringError::BufferTooSmall { required }) => buf.resize(required, 0),
+                Err(KeyringError::BufferTooSmall { required }) => {
+                    // Guard against a bogus `required`. It must grow the
+                    // buffer, and a failed allocation must not abort mysqld.
+                    if required <= buf.len() || buf.try_reserve_exact(required - buf.len()).is_err()
+                    {
+                        return Err(KeyringError::BufferTooSmall { required });
+                    }
+                    buf.resize(required, 0);
+                }
                 Err(e) => return Err(e),
             }
         }
