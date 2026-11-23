@@ -90,17 +90,17 @@ fn read_threshold_impl(_args: &[InValue]) -> VdfReturn {
         )
     };
     match result {
-        // Some(false) = success: *val is a malloc'd NUL-terminated string we now own.
-        Some(false) => {
-            // SAFETY: on success get() wrote avalid NUL-terminated C string to *val.
+        // Ok(()) = success: *val is a malloc'd NUL-terminated string we now own.
+        Ok(()) => {
+            // SAFETY: on success get() wrote a valid NUL-terminated C string to *val.
             let s = unsafe { CStr::from_ptr(val.cast::<c_char>()) }
                 .to_string_lossy()
                 .into_owned();
-            // SAFETY: *val came from the server'sC malloc; release it per the contract.
+            // SAFETY: *val came from the server's C malloc; release it per the contract.
             unsafe { free(val) };
             VdfReturn::string(s)
         }
-        _ => VdfReturn::null(),
+        Err(_) => VdfReturn::null(),
     }
 }
 
@@ -119,8 +119,7 @@ fn set_threshold_500_impl(_args: &[InValue]) -> VdfReturn {
             500,
         )
     };
-    // set() returns Some(false) on success (inverted C bool).
-    VdfReturn::int(i64::from(result == Some(false)))
+    VdfReturn::int(i64::from(result.is_ok()))
 }
 
 villagesql::extension! {
