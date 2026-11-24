@@ -121,12 +121,15 @@ impl<'a> Session<'a> {
     ///
     /// # Panics
     /// If `f` panics, iteration stops and the panic propagates out of
-    /// `for_each` once the server call returns.
+    /// `for_each` once the server call returns. In a thread worker it then ends
+    /// the work function like any other panic; see
+    /// [`WakeupReason`](super::thread_worker::WakeupReason) for how the worker
+    /// handles that.
     pub fn for_each<F>(&self, sql: &str, f: F) -> Option<QueryResult<'a>>
     where
         F: FnMut(Row<'_>),
     {
-        // C entry point: recover the ForEachCFtx from ctx, build a Row, call f.
+        // C entry point: recover the ForEachCtx from ctx, build a Row, call f.
         // On panic we stash the payload and stop (returning false) rather than
         // let it unwind across the C boundary. for_each re-raises it afterward.
         unsafe extern "C" fn trampoline<F: FnMut(Row<'_>)>(
@@ -398,6 +401,15 @@ impl Diag {
 mod tests {
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::AtomicUsize;
+
+    // How many times fake_close_result has run.
+    static CLOSED: AtomicUsize = AtomicUsize::new(0);
+
+    // Stand-in for the server's close_result: just counts calls.
+    unsafe extern "C" fn fake_close_result(_result: *mut vef_sql_result_t) {
+        CLOSED.fetch_add(1, Ordering::SeqCst);
+    }
 
     // Stand-in for the server's for_each_row: feeds three rows to `cb`,
     // stopping early if `cb` returns false, like the real one does.
@@ -414,7 +426,7 @@ mod tests {
                 break;
             }
         }
-        std::ptr::null_mut()
+        std::ptr::NonNull::dangling().as_ptr()
     }
 
     #[test]
@@ -422,6 +434,7 @@ mod tests {
         // SAFETY: an all-zero vtable is valid. Every fn pointer is None.
         let mut vtable: vef_preview_sql_query_t = unsafe { std::mem::zeroed() };
         vtable.for_each_row = Some(fake_for_each_row);
+        vtable.close_result = Some(fake_close_result);
         let session = Session {
             vtable: &vtable,
             handle: std::ptr::null_mut(),
@@ -438,5 +451,10 @@ mod tests {
         let payload = caught.expect_err("the closure's panic propagates out of for_each");
         assert_eq!(payload.downcast_ref::<&str>(), Some(&"boom"));
         assert_eq!(calls, 1, "iteration stops at the first panic");
+        assert_eq!(
+            CLOSED.load(Ordering::SeqCst),
+            1,
+            "the result handle is closed during the unwind"
+        );
     }
 }
