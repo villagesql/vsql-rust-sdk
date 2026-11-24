@@ -110,6 +110,25 @@ fn sdk_len_sum_result_panic(_state: &LenSum) -> VdfReturn {
     panic!("sdk_len_sum_result_panic");
 }
 
+// Aggregate whose state can't be created.
+/// Accumulator whose `Default` panics. `agg_func!` creates the state with
+/// `T::default()` in prerun, so this exercises the agg prerun panic path.
+pub struct PanicDefault;
+
+impl Default for PanicDefault {
+    fn default() -> Self {
+        panic!("PanicDefault::default");
+    }
+}
+
+fn sdk_agg_prerun_panic_clear(_state: &mut PanicDefault) {}
+
+fn sdk_agg_prerun_panic_acc(_state: &mut PanicDefault, _args: &[InValue]) {}
+
+fn sdk_agg_prerun_panic_result(_state: &PanicDefault) -> VdfReturn {
+    VdfReturn::null()
+}
+
 // ── Type 1: counter (wraps i64, decimal string representation) ────────────────
 
 pub fn counter_encode(s: &str) -> Result<Vec<u8>, String> {
@@ -463,6 +482,10 @@ villagesql::extension! {
         villagesql::agg_func!(sdk_len_sum_result, "sdk_len_sum_clear_panic",
             [villagesql::Type::String] -> villagesql::Type::Int,
             state: LenSum, clear: sdk_len_sum_clear_panic, accumulate: sdk_len_sum_acc),
+        villagesql::agg_func!(sdk_agg_prerun_panic_result, "sdk_agg_prerun_panic",
+            [villagesql::Type::String] -> villagesql::Type::Int,
+            state: PanicDefault, clear: sdk_agg_prerun_panic_clear,
+            accumulate: sdk_agg_prerun_panic_acc),
         villagesql::func!(tracked, "tracked_no_panic", [] -> villagesql::Type::Int,
             state: Tracked, prerun: tracked_prerun, postrun: tracked_postrun),
         villagesql::func!(tracked, "tracked_prerun_panic", [] -> villagesql::Type::Int,

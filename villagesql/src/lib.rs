@@ -777,6 +777,17 @@ impl<T> PrerunResult<'_, T> {
 
 // ── Internal runtime helpers ──────────────────────────────────────────────────
 
+/// Aggregate state as stored in `user_data`: the author's accumulator plus a
+/// flag set when the author's `clear` panics. `clear` has no result slot, so
+/// the next `accumulate` or `result` call reports the error instead.
+struct AggState<T> {
+    poisoned: bool,
+    value: T,
+}
+
+/// Error reported by `accumulate` or `result` when a earlier `clear` panicked.
+const CLEAR_PANIC_MSG: &str = "panic!() in dispatch_clear";
+
 /// Borrow the state stashed by `set_state`, without taking ownership.
 ///
 /// # Safety
@@ -993,33 +1004,47 @@ pub unsafe fn dispatch_postrun_with_hook<T>(f: fn(&mut T), args: *mut vef_postru
 /// # Safety
 /// `result` must be valid for the duration of the call.
 #[doc(hidden)]
-// TODO(villagesql-general): no error reporting, no test
-#[doc(hidden)]
 pub unsafe fn dispatch_agg_prerun<T: Default>(
     _args: *mut vef_prerun_args_t,
     result: *mut vef_prerun_result_t,
 ) {
     let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        PrerunResult::<T>::from_raw(result).set_state(T::default());
+        PrerunResult::<AggState<T>>::from_raw(result).set_state(AggState {
+            poisoned: false,
+            value: T::default(),
+        });
     }));
     if panic_result.is_err() {
-        let presult = PrerunResult::<T>::from_raw(result);
+        let presult = PrerunResult::<AggState<T>>::from_raw(result);
         presult.error("panic!() in dispatch_agg_prerun");
     }
 }
 
-/// Aggregate clear: reset the accumulator at the start of each group.
+/// Aggregate postrun: reclaim and drop the accumulator allocated by
+/// [`dispatch_agg_prerun`].
+///
+/// # Safety
+/// `args` is valid (set by prerun). `T` matches what prerun set.
+#[doc(hidden)]
+pub unsafe fn dispatch_agg_postrun<T>(args: *mut vef_postrun_args_t) {
+    reclaim_state::<AggState<T>>((*args).user_data);
+}
+
+/// Aggregate clear: reset the accumulator at the start of each group. `clear`
+/// has no result slot, so a panic poisons the state and the next `accumulate`
+/// or `result` call reports the error instead.
 ///
 /// # Safety
 /// `args` is valid. Its `user_data` was set by a prior prerun. `T` matches.
 #[doc(hidden)]
-// TODO(villagesql-general): no error reporting on clear panic
-#[doc(hidden)]
 pub unsafe fn dispatch_clear<T>(f: fn(&mut T), args: *mut vef_vdf_args_t) {
-    let state = borrow_state::<T>((*args).user_data);
-    let _panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        f(state);
+    let state = borrow_state::<AggState<T>>((*args).user_data);
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        f(&mut state.value);
     }));
+    if panic_result.is_err() {
+        state.poisoned = true;
+    }
 }
 
 /// Aggregate accumulate: fold one row into the accumulator. The author's
@@ -1036,9 +1061,13 @@ pub unsafe fn dispatch_accumulate<T>(
 ) {
     let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let args = &*args;
-        let state = borrow_state::<T>(args.user_data);
+        let state = borrow_state::<AggState<T>>(args.user_data);
+        if state.poisoned {
+            write_result(VdfReturn::Error(CLEAR_PANIC_MSG.to_string()), &mut *result);
+            return;
+        }
         match read_in_values(args) {
-            Ok(in_values) => f(state, &in_values),
+            Ok(in_values) => f(&mut state.value, &in_values),
             Err(msg) => write_result(VdfReturn::Error(msg), &mut *result),
         }
     }));
@@ -1057,8 +1086,13 @@ pub unsafe fn dispatch_agg_result<T>(
     result: *mut vef_vdf_result_t,
 ) {
     let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let state = borrow_state::<T>((*args).user_data);
-        write_result(f(state), &mut *result);
+        let state = borrow_state::<AggState<T>>((*args).user_data);
+        let ret = if state.poisoned {
+            VdfReturn::Error(CLEAR_PANIC_MSG.to_string())
+        } else {
+            f(&state.value)
+        };
+        write_result(ret, &mut *result);
     }));
     report_panic(&panic_result, "dispatch_agg_result", &mut *result);
 }
@@ -1968,7 +2002,7 @@ macro_rules! agg_func {
                 args: *mut $crate::sys::vef_postrun_args_t,
                 _result: *mut $crate::sys::vef_postrun_result_t,
             ) {
-                $crate::dispatch_postrun::<$state>(args);
+                $crate::dispatch_agg_postrun::<$state>(args);
             }
             // clear trampoline: note the ABI has no result param here.
             unsafe extern "C" fn [< __vsql_clear_ $result_fn >](
