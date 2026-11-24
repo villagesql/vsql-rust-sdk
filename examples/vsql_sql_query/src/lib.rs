@@ -42,32 +42,32 @@ fn worker(reason: WakeupReason, handle: &ThreadHandle) -> NextWakeup {
 /// On the worker thread: open a session, run the full check suite, record which
 /// API paths behaved correctly as a bitmask (`63` = 111111 = all six).
 fn run_probe(handle: &ThreadHandle) {
-    let Some(session) = SQL_QUERY.open(handle) else {
+    let Ok(session) = SQL_QUERY.open(handle) else {
         CHECKS.store(-2, Ordering::Relaxed);
         return;
     };
     let mut mask: i64 = 0;
 
     // Buffered execute + typed int column.
-    if let Some(mut r) = session.execute("SELECT 1 + 1") {
+    if let Ok(mut r) = session.execute("SELECT 1 + 1") {
         if !r.has_error() && r.next_row().is_some_and(|row| row.get_int(0) == Some(2)) {
             mask |= CHECK_INT;
         }
     }
     // String column.
-    if let Some(mut r) = session.execute("SELECT 'hi'") {
+    if let Ok(mut r) = session.execute("SELECT 'hi'") {
         if r.next_row().is_some_and(|row| row.get_str(0) == Some("hi")) {
             mask |= CHECK_STR;
         }
     }
     // SQL NULL -> None.
-    if let Some(mut r) = session.execute("SELECT NULL") {
+    if let Ok(mut r) = session.execute("SELECT NULL") {
         if r.next_row().is_some_and(|row| row.get_str(0).is_none()) {
             mask |= CHECK_NULL;
         }
     }
     // Float column.
-    if let Some(mut r) = session.execute("SELECT 1.5") {
+    if let Ok(mut r) = session.execute("SELECT 1.5") {
         if r.next_row()
             .is_some_and(|row| row.get_real(0).is_some_and(|v| (v - 1.5).abs() < 1e-9))
         {
@@ -76,7 +76,7 @@ fn run_probe(handle: &ThreadHandle) {
     }
     // Streaming for_each over multiple rows.
     let mut sum = 0i64;
-    if let Some(r) = session.for_each("SELECT 1 UNION SELECT 2 UNION SELECT 3", |row| {
+    if let Ok(r) = session.for_each("SELECT 1 UNION SELECT 2 UNION SELECT 3", |row| {
         if let Some(v) = row.get_int(0) {
             sum += v;
         }
@@ -86,7 +86,7 @@ fn run_probe(handle: &ThreadHandle) {
         }
     }
     // Error diagnostics on a bad statement.
-    if let Some(r) = session.execute("SELECT * FROM vsql_sql_query_no_such_table") {
+    if let Ok(r) = session.execute("SELECT * FROM vsql_sql_query_no_such_table") {
         if r.has_error() && r.error().is_some() {
             mask |= CHECK_ERROR;
         }

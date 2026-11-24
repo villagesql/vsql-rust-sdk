@@ -23,6 +23,33 @@ use crate::sys::{
 
 const VTABLE_HASH: &[u8] = b"ver-1\0";
 
+/// Why a `sql_query` call couldn't produce a session or a result.
+///
+/// A statement that ran but failed (bad SQL, missing table) is not an error
+/// here. It comes back as `Ok(QueryResult)` with [`QueryResult::has_error`]
+/// set, so its warnings can still be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlQueryError {
+    /// The capability was not wired up. The server never populated the
+    /// vtable, a needed function pointer is null, or its ABI version is
+    /// older than this SDK requires.
+    CapabilityUnavailable,
+    /// The server could not open the session or start the statement, for
+    /// example because it ran out of memory.
+    Failed,
+}
+
+impl std::fmt::Display for SqlQueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SqlQueryError::CapabilityUnavailable => "sql_query capability is unavailable",
+            SqlQueryError::Failed => "sql_query operation failed",
+        })
+    }
+}
+
+impl std::error::Error for SqlQueryError {}
+
 /// The `vsql::preview::sql_query` capability. Declare it as a `static` and list
 /// it via `requires: [&SQL_QUERY]`. Open a session from inside a thread-worker
 /// callback with [`SqlQueryCapability::open`].
@@ -42,28 +69,32 @@ impl SqlQueryCapability {
         }
     }
 
-    /// Open a SQL session bound to the worker thread. `None` if the capability
-    /// wasn't populated (preview off/not requested), the ABI is too old, or
-    /// the server failed to open a session.
-    #[must_use]
-    pub fn open(&self, handle: &ThreadHandle) -> Option<Session<'_>> {
+    /// Open a SQL session bound to the worker thread.
+    ///
+    /// # Errors
+    /// - [`SqlQueryError::CapabilityUnavailable`]: preview disabled or not
+    ///   requested, the server's ABI is too old, or `open_session` is unset.
+    /// - [`SqlQueryError::Failed`]: the server could not open a session.
+    pub fn open(&self, handle: &ThreadHandle) -> Result<Session<'_>, SqlQueryError> {
         let vtable = self.abi_.load(Ordering::Acquire);
         if vtable.is_null() {
-            return None;
+            return Err(SqlQueryError::CapabilityUnavailable);
         }
         // SAFETY: non-null slot written by the server at load time. Points to a
         // 'static vef_preview_sql_query_t the server owns.
         let vtable = unsafe { &*vtable };
         if vtable.version < VEF_PREVIEW_SQL_QUERY_ABI_VERSION {
-            return None;
+            return Err(SqlQueryError::CapabilityUnavailable);
         }
-        let open = vtable.open_session?;
+        let open = vtable
+            .open_session
+            .ok_or(SqlQueryError::CapabilityUnavailable)?;
         // SAFETY: server-provided fn. `handle` is a live worker-thread handle.
         let raw = unsafe { open(handle.as_raw()) };
         if raw.is_null() {
-            return None;
+            return Err(SqlQueryError::Failed);
         }
-        Some(Session {
+        Ok(Session {
             vtable,
             handle: raw,
         })
@@ -97,18 +128,27 @@ pub struct Session<'a> {
 }
 
 impl<'a> Session<'a> {
-    /// Execute a SQL statement, buffering the full result set. `None` only on
-    /// setup failure (no session / OOM). A returned `QueryResult` may still be a
-    /// failed query. Check `has_error()` / `error()`.
-    #[must_use]
-    pub fn execute(&self, sql: &str) -> Option<QueryResult<'a>> {
-        let exec = self.vtable.execute?;
+    /// Execute a SQL statement, buffering the full result set.
+    ///
+    /// An `Ok` result may still hold a failed statement: check
+    /// [`QueryResult::has_error`] / [`QueryResult::error`].
+    ///
+    /// # Errors
+    /// - [`SqlQueryError::CapabilityUnavailable`]: the server doesn't provide
+    ///   `execute`.
+    /// - [`SqlQueryError::Failed`]: the server couldn't start the statement,
+    ///   for example because it ran out of memory.
+    pub fn execute(&self, sql: &str) -> Result<QueryResult<'a>, SqlQueryError> {
+        let exec = self
+            .vtable
+            .execute
+            .ok_or(SqlQueryError::CapabilityUnavailable)?;
         // SAFETY: server-provided fn. sql/len describe a valid UTF-8 buffer.
         let raw = unsafe { exec(self.handle, sql.as_ptr().cast::<c_char>(), sql.len()) };
         if raw.is_null() {
-            return None;
+            return Err(SqlQueryError::Failed);
         }
-        Some(QueryResult {
+        Ok(QueryResult {
             vtable: self.vtable,
             handle: raw,
         })
@@ -117,7 +157,11 @@ impl<'a> Session<'a> {
     /// Execute `sql`, invoking `f` once per row without buffering the full
     /// result set. Returns a `QueryResult` that carries diagnostics only (no
     /// buffered rows). Check `has_error()` / `warnings()` on it afterward.
-    /// `None` on setup failure.
+    ///
+    /// # Errors
+    /// - [`SqlQueryError::CapabilityUnavailable`]: the server doesn't provide
+    ///   `for_each_row`.
+    /// - [`SqlQueryError::Failed`]: the server couldn't start the statement.
     ///
     /// # Panics
     /// If `f` panics, iteration stops and the panic propagates out of
@@ -125,7 +169,7 @@ impl<'a> Session<'a> {
     /// the work function like any other panic; see
     /// [`WakeupReason`](super::thread_worker::WakeupReason) for how the worker
     /// handles that.
-    pub fn for_each<F>(&self, sql: &str, f: F) -> Option<QueryResult<'a>>
+    pub fn for_each<F>(&self, sql: &str, f: F) -> Result<QueryResult<'a>, SqlQueryError>
     where
         F: FnMut(Row<'_>),
     {
@@ -155,7 +199,10 @@ impl<'a> Session<'a> {
             }
         }
 
-        let for_each_fn = self.vtable.for_each_row?;
+        let for_each_fn = self
+            .vtable
+            .for_each_row
+            .ok_or(SqlQueryError::CapabilityUnavailable)?;
 
         let mut state = ForEachCtx { f, panic: None };
         let ctx = std::ptr::from_mut(&mut state).cast::<c_void>();
@@ -174,9 +221,9 @@ impl<'a> Session<'a> {
         // Wrap the handle first: if we re-raise below, QueryResult's Drop still
         // closes it during the unwind.
         let result = if raw.is_null() {
-            None
+            Err(SqlQueryError::Failed)
         } else {
-            Some(QueryResult {
+            Ok(QueryResult {
                 vtable: self.vtable,
                 handle: raw,
             })
@@ -411,7 +458,7 @@ mod tests {
         CLOSED.fetch_add(1, Ordering::SeqCst);
     }
 
-    // Stand-in for the server's for_each_row: feeds three rows to `cb`,
+    // Replacement for the server's for_each_row: feeds three rows to `cb`,
     // stopping early if `cb` returns false, like the real one does.
     unsafe extern "C" fn fake_for_each_row(
         _session: *mut vef_sql_session_t,
