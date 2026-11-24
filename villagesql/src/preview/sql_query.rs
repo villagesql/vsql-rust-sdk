@@ -82,6 +82,14 @@ impl Capability for &'static SqlQueryCapability {
     }
 }
 
+/// What `for_each` passes to the C row callback through `ctx`: the author's
+/// closure, plus a slot for a panic caught mid-iteration. This allows `for_each`
+/// to re-raise the panic once the server call returns.
+struct ForEachCtx<F> {
+    f: F,
+    panic: Option<Box<dyn std::any::Any + Send>>,
+}
+
 /// An open SQL session, bound to the worker thread. Closes automatically on drop.
 pub struct Session<'a> {
     vtable: &'a vef_preview_sql_query_t,
@@ -110,32 +118,47 @@ impl<'a> Session<'a> {
     /// result set. Returns a `QueryResult` that carries diagnostics only (no
     /// buffered rows). Check `has_error()` / `warnings()` on it afterward.
     /// `None` on setup failure.
-    pub fn for_each<F>(&self, sql: &str, mut f: F) -> Option<QueryResult<'a>>
+    ///
+    /// # Panics
+    /// If `f` panics, iteration stops and the panic propagates out of
+    /// `for_each` once the server call returns. In a thread worker it then ends
+    /// the work function like any other panic; see
+    /// [`WakeupReason`](super::thread_worker::WakeupReason) for how the worker
+    /// handles that.
+    pub fn for_each<F>(&self, sql: &str, f: F) -> Option<QueryResult<'a>>
     where
         F: FnMut(Row<'_>),
     {
-        // C entry point: recover F from ctx, build a Row, call f. On panic we
-        // stop (returning false) rather than let it unwind across the C boundary.
+        // C entry point: recover the ForEachCtx from ctx, build a Row, call f.
+        // On panic we stash the payload and stop (returning false) rather than
+        // let it unwind across the C boundary. for_each re-raises it afterward.
         unsafe extern "C" fn trampoline<F: FnMut(Row<'_>)>(
             row: *mut *const c_char,
             lengths: *const c_ulong,
             num_columns: c_uint,
             ctx: *mut c_void,
         ) -> bool {
-            // SAFETY: ctx is the &mut F we pass to for_each_row below.
-            let f = unsafe { &mut *(ctx.cast::<F>()) };
+            // SAFETY: ctx is the &mut ForEachCtx<F> we pass to for_each_row below.
+            let state = unsafe { &mut *(ctx.cast::<ForEachCtx<F>>()) };
             let row = Row {
                 row,
                 lengths,
                 num_columns,
                 _marker: PhantomData,
             };
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(row))).is_ok()
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (state.f)(row))) {
+                Ok(()) => true,
+                Err(payload) => {
+                    state.panic = Some(payload);
+                    false
+                }
+            }
         }
 
         let for_each_fn = self.vtable.for_each_row?;
 
-        let ctx = std::ptr::from_mut(&mut f).cast::<c_void>();
+        let mut state = ForEachCtx { f, panic: None };
+        let ctx = std::ptr::from_mut(&mut state).cast::<c_void>();
         // SAFETY: server-provided fn. sql/len valid. Trampoline and ctx live for
         // the whole call.
         let raw = unsafe {
@@ -147,13 +170,23 @@ impl<'a> Session<'a> {
                 ctx,
             )
         };
-        if raw.is_null() {
-            return None;
+
+        // Wrap the handle first: if we re-raise below, QueryResult's Drop still
+        // closes it during the unwind.
+        let result = if raw.is_null() {
+            None
+        } else {
+            Some(QueryResult {
+                vtable: self.vtable,
+                handle: raw,
+            })
+        };
+        if let Some(payload) = state.panic {
+            // Unwinding is safe here. The thread worker's catch_unwind catches
+            // it.
+            std::panic::resume_unwind(payload);
         }
-        Some(QueryResult {
-            vtable: self.vtable,
-            handle: raw,
-        })
+        result
     }
 }
 
@@ -361,5 +394,67 @@ impl Diag {
             sqlstate,
             message,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::AtomicUsize;
+
+    // How many times fake_close_result has run.
+    static CLOSED: AtomicUsize = AtomicUsize::new(0);
+
+    // Stand-in for the server's close_result: just counts calls.
+    unsafe extern "C" fn fake_close_result(_result: *mut vef_sql_result_t) {
+        CLOSED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    // Stand-in for the server's for_each_row: feeds three rows to `cb`,
+    // stopping early if `cb` returns false, like the real one does.
+    unsafe extern "C" fn fake_for_each_row(
+        _session: *mut vef_sql_session_t,
+        _sql: *const c_char,
+        _sql_len: usize,
+        cb: crate::sys::vef_sql_row_cb,
+        ctx: *mut c_void,
+    ) -> *mut vef_sql_result_t {
+        let cb = cb.expect("for_each passes a callback");
+        for _ in 0..3 {
+            if !unsafe { cb(std::ptr::null_mut(), std::ptr::null(), 0, ctx) } {
+                break;
+            }
+        }
+        std::ptr::NonNull::dangling().as_ptr()
+    }
+
+    #[test]
+    fn for_each_propagates_closure_panic() {
+        // SAFETY: an all-zero vtable is valid. Every fn pointer is None.
+        let mut vtable: vef_preview_sql_query_t = unsafe { std::mem::zeroed() };
+        vtable.for_each_row = Some(fake_for_each_row);
+        vtable.close_result = Some(fake_close_result);
+        let session = Session {
+            vtable: &vtable,
+            handle: std::ptr::null_mut(),
+        };
+
+        let mut calls = 0;
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            let _ = session.for_each("SELECT 1", |_row| {
+                calls += 1;
+                panic!("boom");
+            });
+        }));
+
+        let payload = caught.expect_err("the closure's panic propagates out of for_each");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"boom"));
+        assert_eq!(calls, 1, "iteration stops at the first panic");
+        assert_eq!(
+            CLOSED.load(Ordering::SeqCst),
+            1,
+            "the result handle is closed during the unwind"
+        );
     }
 }
