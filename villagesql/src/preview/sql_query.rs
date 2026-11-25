@@ -29,6 +29,7 @@ const VTABLE_HASH: &[u8] = b"ver-1\0";
 /// here. It comes back as `Ok(QueryResult)` with [`QueryResult::has_error`]
 /// set, so its warnings can still be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SqlQueryError {
     /// The capability was not wired up. The server never populated the
     /// vtable, a needed function pointer is null, or its ABI version is
@@ -458,7 +459,7 @@ mod tests {
         CLOSED.fetch_add(1, Ordering::SeqCst);
     }
 
-    // Replacement for the server's for_each_row: feeds three rows to `cb`,
+    // Stand-in for the server's for_each_row: feeds three rows to `cb`,
     // stopping early if `cb` returns false, like the real one does.
     unsafe extern "C" fn fake_for_each_row(
         _session: *mut vef_sql_session_t,
