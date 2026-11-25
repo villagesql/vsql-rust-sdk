@@ -99,13 +99,14 @@ SELECT sdk_len_sum(text) from t1 GROUP BY text ORDER BY text;
 sdk_len_sum(text)
 6
 2
-(second with panic and wrong values)
+(second with panic)
 SELECT sdk_len_sum_clear_panic(text) from t1 GROUP BY text ORDER BY text;
-sdk_len_sum_clear_panic(text)
-6
-8
+ERROR HY000: VDF error in function 'sdk_len_sum_clear_panic': panic!() in dispatch_clear
 #3. Panic: accumulate
 SELECT sdk_len_sum_acc_panic(text) from t1;
 ERROR HY000: VDF error in function 'sdk_len_sum_acc_panic': panic!() in dispatch_accumulate
+#4. Panic: prerun use of T::default
+SELECT sdk_agg_prerun_panic(text) from t1;
+ERROR HY000: Can't initialize function 'sdk_agg_prerun_panic'; panic!() in dispatch_agg_prerun
 DROP TABLE t1;
 UNINSTALL EXTENSION sdk_coverage;

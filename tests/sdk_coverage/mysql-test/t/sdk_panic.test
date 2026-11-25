@@ -153,18 +153,19 @@ SELECT sdk_len_sum_result_panic(s) FROM (VALUES ROW('12'), ROW('34'), ROW('56'))
 CREATE TABLE t1 (id INT, text VARCHAR(4));
 INSERT INTO t1 VALUES (1, '12'), (2, '34'), (3, '12'), (4, '12');
 
-# TODO(villagesql-general): no clear error reporting
 --echo #2. Panic: clear (first without panic)
 SELECT sdk_len_sum(text) from t1 GROUP BY text ORDER BY text;
---echo                  (second with panic and wrong values)
+--echo                  (second with panic)
+--error ER_UDF_ERROR
 SELECT sdk_len_sum_clear_panic(text) from t1 GROUP BY text ORDER BY text;
 
 --echo #3. Panic: accumulate
 --error ER_UDF_ERROR
 SELECT sdk_len_sum_acc_panic(text) from t1;
 
-# TODO(villagesql-general): no prerun test or error
-#--echo #4. Panic: prerun use of T::default
+--echo #4. Panic: prerun use of T::default
+--error ER_CANT_INITIALIZE_UDF
+SELECT sdk_agg_prerun_panic(text) from t1;
 
 DROP TABLE t1;
 
