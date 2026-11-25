@@ -36,6 +36,29 @@ const VTABLE_HASH: &[u8] = b"ver-2\0";
 /// `capability_config` version tag the server matches against.
 const CONFIG_HASH: &[u8] = b"ver-1\0";
 
+/// Why a [`SysVarCapability`] call failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SysVarError {
+    /// The capability was not wired up. The server never populated the vtable,
+    /// its function pointers are null, or its ABI version is older than this
+    /// SDK requires.
+    CapabilityUnavailable,
+    /// The server reported an error, for example an unknown variable or a value
+    /// of the wrong type.
+    Failed,
+}
+
+impl std::fmt::Display for SysVarError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SysVarError::CapabilityUnavailable => "sys_var capability is unavailable",
+            SysVarError::Failed => "sys_var operation failed",
+        })
+    }
+}
+
+impl std::error::Error for SysVarError {}
+
 /// One system variable an extension wants to declare.
 ///
 /// The server prefixes every name with the extension's own, so a variable declared
@@ -109,47 +132,58 @@ impl SysVarCapability {
         }
     }
 
+    // The server-populated vtable, if the capability is available and new enough.
+    fn vtable(&self) -> Result<&vef_preview_sys_var_t, SysVarError> {
+        let ptr = self.abi_.load(Ordering::Acquire);
+        if ptr.is_null() {
+            return Err(SysVarError::CapabilityUnavailable);
+        }
+        // SAFETY: non-null slot was written by the server at load time and points
+        // to a 'static vef_preview_sys_var_t the server owns.
+        let vtable = unsafe { &*ptr };
+        if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
+            return Err(SysVarError::CapabilityUnavailable);
+        }
+        Ok(vtable)
+    }
+
     /// Read a system variable owned by `component_name` (an extension name),
     /// via the `vsql::sys_var` capability.
     ///
-    /// # Returns
-    /// - `None` — the capability is unavailable (preview disabled / not
-    ///   requested, or the server's ABI is too old / `get` unset).
-    /// - `Some(false)` — **success**: the server wrote a newly `malloc`'d,
-    ///   NUL-terminated value string into `*val` and its length into `*val_len`.
-    /// - `Some(true)` — the server reported an error; `*val`/`*val_len` are left
-    ///   untouched.
+    /// On success, the server has written a newly `malloc`'d, NUL-terminated
+    /// value string into `*val` and its length into `*val_len`.
     ///
-    /// (Note the inverted C convention: `false` means success.)
+    /// # Errors
+    /// - [`SysVarError::CapabilityUnavailable`]: preview disabled / not requested,
+    ///   or the server's ABI is too old / `get` unset.
+    /// - [`SysVarError::Failed`]: the server reported an error; `*val`/`*val_len`
+    ///   are left untouched.
     ///
     /// # Safety
     /// - `component_name` and `name` must be valid, NUL-terminated C strings;
     ///   `val` and `val_len` must be valid, writable pointers — all valid for
     ///   the duration of the call.
-    /// - `*val` is written **only** on `Some(false)`; you must then release it
-    ///   with the C `free()`. On `Some(true)` or `None`, do not read or free
-    ///   `*val` — it was not written.
-    #[must_use]
+    /// - `*val` is written **only** on `Ok(())`; you must then release it
+    ///   with the C `free()`. On `Err`, do not read or free `*val` — it was not
+    ///   written.
     pub unsafe fn get(
         &self,
         component_name: *const c_char,
         name: *const c_char,
         val: *mut *mut c_void,
         val_len: *mut usize,
-    ) -> Option<bool> {
-        let vtable = self.abi_.load(Ordering::Acquire);
-        if vtable.is_null() {
-            return None;
-        }
-        // SAFETY: non-null slot written by the server at load time, points to a
-        // 'static vef_preview_sys_var_t the server owns.
-        let vtable = unsafe { &*vtable };
-        if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
-            return None;
-        }
-        let get_fn = vtable.get?;
+    ) -> Result<(), SysVarError> {
+        let get_fn = self
+            .vtable()?
+            .get
+            .ok_or(SysVarError::CapabilityUnavailable)?;
         // SAFETY: server-provided function pointer; pointers valid for the call.
-        Some(unsafe { get_fn(component_name, name, val, val_len) })
+        // The C function returns `true` on error.
+        if unsafe { get_fn(component_name, name, val, val_len) } {
+            Err(SysVarError::Failed)
+        } else {
+            Ok(())
+        }
     }
 
     /// Set a STRING, BOOL or DOUBLE system variable owned by `component_name`
@@ -160,75 +194,67 @@ impl SysVarCapability {
     /// running value + persisted, `"PERSIST_ONLY"` = persisted (applies on
     /// restart).
     ///
-    /// # Returns
-    /// - `None` — the capability is unavailable (preview disabled / not
-    ///   requested, or the server's ABI is too old / `set` unset).
-    /// - `Some(false)` — **success** (note the inverted C convention).
-    /// - `Some(true)` — the server reported an error.
+    /// # Errors
+    /// - [`SysVarError::CapabilityUnavailable`]: preview disabled or not
+    ///   requested, or the server's ABI is too old or `set` is unset.
+    /// - [`SysVarError::Failed`]: the server reported an error.
     ///
     /// # Safety
     /// `component_name`, `name`, and `val` must be valid, NUL-terminated C
     /// strings; `scope` must be null or a valid NUL-terminated C string — all
     /// valid for the duration of the call.
-    #[must_use]
     pub unsafe fn set(
         &self,
         component_name: *const c_char,
         name: *const c_char,
         scope: *const c_char,
         val: *const c_char,
-    ) -> Option<bool> {
-        let vtable = self.abi_.load(Ordering::Acquire);
-        if vtable.is_null() {
-            return None;
-        }
-        // SAFETY: non-null slot written by the server at load time, points to a
-        // 'static vef_preview_sys_var_t the server owns.
-        let vtable = unsafe { &*vtable };
-        if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
-            return None;
-        }
-        let set_fn = vtable.set?;
+    ) -> Result<(), SysVarError> {
+        let set_fn = self
+            .vtable()?
+            .set
+            .ok_or(SysVarError::CapabilityUnavailable)?;
         // SAFETY: server-provided function pointer; pointers valid for the call.
-        Some(unsafe { set_fn(component_name, name, scope, val) })
+        // The C function returns `true` on error.
+        if unsafe { set_fn(component_name, name, scope, val) } {
+            Err(SysVarError::Failed)
+        } else {
+            Ok(())
+        }
     }
 
     /// Set an INT system variable owned by `component_name` to `val`, via the
     /// `vsql::sys_var` capability. An INT variable cannot be set from a string,
     /// so use this for INT and [`set`](Self::set) for every other type.
     ///
-    /// # Returns
-    /// - `None` - the capability is unavailable (preview disabled / not requested,
-    ///   or the server's `sys_var` ABI is older than version 2, which added this
-    ///   function).
-    /// - `Some(false)` - **success** (note the inverted C convention).
-    /// - `Some(true)` - the server reported an error.
+    /// # Errors
+    /// - [`SysVarError::CapabilityUnavailable`]: preview disabled or not
+    ///   requested, or the server's `sys_var` ABI is older than version 2,
+    ///   which added this function.
+    /// - [`SysVarError::Failed`]: the server reported an error.
     ///
     /// # Safety
     /// `component_name` and `name` must be valid, NUL-terminated C strings.
     /// `scope` must be null or a valid NUL-terminated C string - all valid for
     /// the duration of the call.
-    #[must_use]
     pub unsafe fn set_int(
         &self,
         component_name: *const c_char,
         name: *const c_char,
         scope: *const c_char,
         val: i64,
-    ) -> Option<bool> {
-        let vtable = self.abi_.load(Ordering::Acquire);
-        if vtable.is_null() {
-            return None;
+    ) -> Result<(), SysVarError> {
+        let set_int_fn = self
+            .vtable()?
+            .set_int
+            .ok_or(SysVarError::CapabilityUnavailable)?;
+        // SAFETY: server-provided function pointer; pointers valid for the call.
+        // The C function returns `true` on error.
+        if unsafe { set_int_fn(component_name, name, scope, val) } {
+            Err(SysVarError::Failed)
+        } else {
+            Ok(())
         }
-        // SAFETY: non-null slot written by the server at load time, points to a
-        // 'static vef_preview_sys_var_t the server owns.
-        let vtable = unsafe { &*vtable };
-        if vtable.version < VEF_PREVIEW_SYS_VAR_ABI_VERSION {
-            return None;
-        }
-        let set_int_fn = vtable.set_int?;
-        // SAFETY: server-provided function pointer. Pointers valid for the call.
-        Some(unsafe { set_int_fn(component_name, name, scope, val) })
     }
 }
 
