@@ -165,6 +165,8 @@ jobs:
             dir: examples/vsql_thread_worker
           - name: vsql_varargs
             dir: examples/vsql_varargs
+          - name: vsql_varlen
+            dir: examples/vsql_varlen
 
     steps:
       - name: Checkout

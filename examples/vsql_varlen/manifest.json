@@ -1,0 +1,7 @@
+{
+  "name": "vsql_varlen",
+  "version": "0.1.0",
+  "description": "Example VillageSQL extension: provides a variable-length tag type",
+  "author": "VillageSQL Community",
+  "license": "GPL-2.0"
+}

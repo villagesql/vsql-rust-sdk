@@ -1,0 +1,30 @@
+# Tests a variable-length custom type. `tag` stores 1 to 64 bytes per value,
+# declared with max_persisted_length: instead of persisted_length:.
+
+INSTALL EXTENSION vsql_varlen;
+
+--echo # The extension registers at protocol 5, and the type is variable-length
+SELECT NEGOTIATED_PROTOCOL,
+       JSON_EXTRACT(REGISTRATION_JSON, '$.types[0].variable_length') AS variable_length
+FROM INFORMATION_SCHEMA.EXTENSION_REGISTRATION
+WHERE EXTENSION_NAME = 'vsql_varlen';
+
+--echo # Each value stores only its own bytes
+SELECT tag_size('hi') AS hi, tag_size('hello') AS hello, tag_size(tag::from_string(REPEAT('x', 64))) AS max;
+
+--echo # A column holds values of different sizes
+CREATE TABLE t1 (id INT, t tag);
+INSERT INTO t1 VALUES (1, 'banana'), (2, 'fig'), (3, 'apple'), (4, 'kiwi');
+SELECT id, t, tag_size(t) AS bytes FROM t1 ORDER BY id;
+
+--echo # ORDER BY uses the compare function
+SELECT t FROM t1 ORDER BY t;
+
+--echo # Values longer than 64 bytes, or empty, are rejected
+--error ER_TRUNCATED_WRONG_VALUE_FOR_FIELD
+INSERT INTO t1 VALUES (5, 'thisissixtyfivecharacterspushingjustabovethelimititstruedontcount');
+--error ER_TRUNCATED_WRONG_VALUE_FOR_FIELD
+INSERT INTO t1 VALUES (6, '');
+
+DROP TABLE t1;
+UNINSTALL EXTENSION vsql_varlen;
