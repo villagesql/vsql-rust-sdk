@@ -14,6 +14,7 @@ members = [
     "examples/vsql_status_var",
     "examples/vsql_sys_var",
     "examples/vsql_varargs",
+    "examples/vsql_varlen",
     "tests/sdk_coverage",
     "examples/vsql_thread_worker",
 ]
@@ -32,6 +33,7 @@ default-members = [
     "examples/vsql_status_var",
     "examples/vsql_sys_var",
     "examples/vsql_varargs",
+    "examples/vsql_varlen",
     "tests/sdk_coverage",
 ]
 resolver = "2"

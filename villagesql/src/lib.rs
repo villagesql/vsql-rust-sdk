@@ -91,12 +91,13 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{OnceLock, PoisonError, RwLock};
 use villagesql_sys::{
     vef_func_desc_t, vef_postrun_args_t, vef_prerun_args_t, vef_prerun_result_t, vef_protocol_t,
-    vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t, vef_required_capability_t,
-    vef_return_value_type_t_VEF_RESULT_ERROR, vef_return_value_type_t_VEF_RESULT_NULL,
-    vef_return_value_type_t_VEF_RESULT_VALUE, vef_return_value_type_t_VEF_RESULT_WARNING,
-    vef_signature_t, vef_type_desc_t, vef_type_id_VEF_TYPE_CUSTOM, vef_type_id_VEF_TYPE_INT,
-    vef_type_id_VEF_TYPE_REAL, vef_type_id_VEF_TYPE_STRING, vef_type_params_t, vef_type_t,
-    vef_vdf_args_t, vef_vdf_result_t, VEF_MAX_ERROR_LEN,
+    vef_protocol_t_VEF_PROTOCOL_3, vef_protocol_t_VEF_PROTOCOL_5, vef_registration_t,
+    vef_required_capability_t, vef_return_value_type_t_VEF_RESULT_ERROR,
+    vef_return_value_type_t_VEF_RESULT_NULL, vef_return_value_type_t_VEF_RESULT_VALUE,
+    vef_return_value_type_t_VEF_RESULT_WARNING, vef_signature_t, vef_type_desc_t,
+    vef_type_id_VEF_TYPE_CUSTOM, vef_type_id_VEF_TYPE_INT, vef_type_id_VEF_TYPE_REAL,
+    vef_type_id_VEF_TYPE_STRING, vef_type_params_t, vef_type_t, vef_vdf_args_t, vef_vdf_result_t,
+    VEF_MAX_ERROR_LEN,
 };
 
 use crate::preview::RequiredCapability;
@@ -606,6 +607,9 @@ pub struct TypeDescriptor {
     pub resolve_params_vdf_name: *const c_char,
     /// Upper bound on persisted bytes across all parameter values. 0 for non-parameterized types.
     pub max_persisted_length: i64,
+    /// Whether stored values vary in size, up to `max_persisted_length`.
+    /// A variable-length type needs protocol 5.
+    pub variable_length: bool,
     /// Optional null-terminated default value string (encoded at install time).
     pub intrinsic_default_str: *const c_char,
     /// Null-terminated name of the `TYPE::intrinsic_default` VDF, or null.
@@ -645,9 +649,12 @@ impl FuncDescriptor {
 
 impl TypeDescriptor {
     /// The lowest protocol the server must support to load this type.
-    #[expect(clippy::unused_self)]
     fn required_protocol(&self) -> vef_protocol_t {
-        MIN_PROTOCOL
+        if self.variable_length {
+            vef_protocol_t_VEF_PROTOCOL_5
+        } else {
+            MIN_PROTOCOL
+        }
     }
 }
 
@@ -1436,7 +1443,7 @@ pub unsafe fn build_registration(
             intrinsic_default_vdf_name: t.descriptor.intrinsic_default_vdf_name,
             intrinsic_default_str: t.descriptor.intrinsic_default_str,
             max_persisted_length: t.descriptor.max_persisted_length,
-            variable_length: false,
+            variable_length: t.descriptor.variable_length,
             from_binary_vdf_name: std::ptr::null(),
             to_binary_vdf_name: std::ptr::null(),
         })));
@@ -2820,11 +2827,53 @@ macro_rules! __vsql_type_vdfs_typed {
 /// | Key | Meaning |
 /// |---|---|
 /// | `type_name:` | The name SQL uses, as a string literal |
-/// | `persisted_length:` | Exact bytes every stored value occupies |
+/// | `persisted_length:` or `max_persisted_length:` | How many bytes a stored value takes. Give exactly one (see [Fixed or variable size](#fixed-or-variable-size)) |
 /// | `max_decode_buffer_length:` | Longest text form `decode` can produce, in bytes |
 /// | `encode:` | `fn(&str) -> Result<Vec<u8>, String>` — text to stored bytes; `Err` rejects a bad value (a warning, or an error in strict mode) |
 /// | `decode:` | `fn(&[u8]) -> Result<String, String>` — stored bytes back to text |
 /// | `compare:` | `fn(&[u8], &[u8]) -> std::cmp::Ordering` — the type's ordering |
+///
+/// # Fixed or variable size
+///
+/// Give exactly one of these two keys. Giving both is a compile error.
+///
+/// - `persisted_length: N`: every stored value is exactly `N` bytes, and `encode`
+///   must return exactly `N` bytes.
+/// - `max_persisted_length: N`: the type is variable-length. Each value stores only
+///   the bytes `encode` returns, from 1 up to `N`, so an empty result is rejected.
+///   Use it when values differ in size, such as text or a list.
+///
+/// A variable-length type needs a server that supports VEF protocol 5 (`VillageSQL`
+/// 0.0.8 or later). On an older server the extension fails to install, with an error
+/// naming the protocol it needs.
+///
+///  ```no_run
+/// # use std::cmp::Ordering;
+/// // A short label, stored as its UTF-8 bytes: 1 to 64 bytes per value.
+/// fn tag_encode(s: &str) -> Result<Vec<u8>, String> {
+///     if s.is_empty() || s.len() > 64 {
+///         return Err("tag: must be 1 to 64 bytes".to_string());
+///     }
+///     Ok(s.as_bytes().to_vec())
+/// }
+/// fn tag_decode(b: &[u8]) -> Result<String, String> {
+///     String::from_utf8(b.to_vec()).map_err(|e| e.to_string())
+/// }
+/// fn tag_compare(a: &[u8], b: &[u8]) -> Ordering {
+///     a.cmp(b)
+/// }
+///
+/// let t = villagesql::custom_type!(
+///     type_name: "tag",
+///     max_persisted_length: 64,
+///     max_decode_buffer_length: 64,
+///     encode: tag_encode,
+///     decode: tag_decode,
+///     compare: tag_compare,
+///     default: "-",
+/// );
+/// # let _ = t;
+/// ```
 ///
 /// # Optional keys
 ///
@@ -2842,7 +2891,8 @@ macro_rules! __vsql_type_vdfs_typed {
 /// **Give a default, one way or the other.** At type initialization the server encodes
 /// the default value; with neither key it encodes the empty string, which most `encode`
 /// functions reject, and the type fails to initialize. Whichever text you supply must
-/// encode to exactly `persisted_length` bytes.
+/// encode to exactly `persisted_length` bytes, or to 1 to `max_persisted_length` bytes
+/// for a variable-length type.
 ///
 /// Use `default:` for a value you can write down, and `intrinsic_default_fn:` for one
 /// that has to be computed. Give one or the other, not both.
@@ -2895,9 +2945,25 @@ macro_rules! __vsql_type_vdfs_typed {
 /// See `examples/vsql_rational` for the complete crate.
 #[macro_export]
 macro_rules! custom_type {
+    // Fixed size: every stored value is exactly `persisted_length` bytes.
     (
         type_name: $type_name:literal,
         persisted_length: $plen:expr,
+        $($rest:tt)*
+    ) => {
+        $crate::custom_type!(@build $type_name, $plen, 0, false, $($rest)*)
+    };
+    // Variable size: each stored value is at most `max_persisted_length` bytes.
+    (
+        type_name: $type_name:literal,
+        max_persisted_length: $max_plen:expr,
+        $($rest:tt)*
+    ) => {
+        $crate::custom_type!(@build $type_name, 0, $max_plen, true, $($rest)*)
+    };
+    // Shared body. Not part of the public syntax.
+    (
+        @build $type_name:literal, $plen:expr, $max_plen:expr, $variable:expr,
         max_decode_buffer_length: $max_dec:expr,
         encode: $enc_fn:ident,
         decode: $dec_fn:ident,
@@ -2950,7 +3016,8 @@ macro_rules! custom_type {
                 resolve_params_vdf_name: ::std::ptr::null(),
                 intrinsic_default_str: __default,
                 intrinsic_default_vdf_name: __intrinsic_default_vdf_name,
-                max_persisted_length: 0,
+                max_persisted_length: $max_plen,
+                variable_length: $variable,
             },
             embedded_funcs: __embedded,
         }
@@ -3153,6 +3220,7 @@ macro_rules! parameterized_type {
                 intrinsic_default_str: __default,
                 intrinsic_default_vdf_name: __intrinsic_default_vdf_name,
                 max_persisted_length: $max_plen,
+                variable_length: false,
             },
             embedded_funcs: __embedded,
         }

@@ -1,0 +1,35 @@
+INSTALL EXTENSION vsql_varlen;
+# The extension registers at protocol 5, and the type is variable-length
+SELECT NEGOTIATED_PROTOCOL,
+JSON_EXTRACT(REGISTRATION_JSON, '$.types[0].variable_length') AS variable_length
+FROM INFORMATION_SCHEMA.EXTENSION_REGISTRATION
+WHERE EXTENSION_NAME = 'vsql_varlen';
+NEGOTIATED_PROTOCOL	variable_length
+5	true
+# Each value stores only its own bytes
+SELECT tag_size('hi') AS hi, tag_size('hello') AS hello, tag_size(tag::from_string(REPEAT('x', 64))) AS max;
+hi	hello	max
+2	5	64
+# A column holds values of different sizes
+CREATE TABLE t1 (id INT, t tag);
+INSERT INTO t1 VALUES (1, 'banana'), (2, 'fig'), (3, 'apple'), (4, 'kiwi');
+SELECT id, t, tag_size(t) AS bytes FROM t1 ORDER BY id;
+id	t	bytes
+1	banana	6
+2	fig	3
+3	apple	5
+4	kiwi	4
+# ORDER BY uses the compare function
+SELECT t FROM t1 ORDER BY t;
+t
+apple
+banana
+fig
+kiwi
+# Values longer than 64 bytes, or empty, are rejected
+INSERT INTO t1 VALUES (5, 'thisissixtyfivecharacterspushingjustabovethelimititstruedontcount');
+ERROR HY000: Incorrect tag value: 'thisissixtyfivecharacterspushingjustabovethelimititstruedontcount' for column 't' at row 1
+INSERT INTO t1 VALUES (6, '');
+ERROR HY000: Incorrect tag value: '' for column 't' at row 1
+DROP TABLE t1;
+UNINSTALL EXTENSION vsql_varlen;
