@@ -84,11 +84,11 @@ pub use villagesql_sys as sys;
 pub mod preview;
 
 use core::ffi::c_void;
-use std::collections::HashMap;
 use std::ffi::c_char;
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
-use std::sync::{OnceLock, PoisonError, RwLock};
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::{Mutex, PoisonError};
 use villagesql_sys::{
     vef_func_desc_t, vef_postrun_args_t, vef_prerun_args_t, vef_prerun_result_t, vef_protocol_t,
     vef_protocol_t_VEF_PROTOCOL_3, vef_registration_t, vef_required_capability_t,
@@ -287,6 +287,13 @@ impl<'a> Params<'a> {
     }
 }
 
+enum MaybeParamsInner<P> {
+    Empty,
+    Owned(P),
+    /// Borrowed from a `TypeParamsCache<P>` entry that lives for `'static`.
+    Cached(*const P),
+}
+
 /// Type parameters that may or may not be known yet.
 ///
 /// On the normal (row-time) path a custom value's params are already known.
@@ -295,39 +302,61 @@ impl<'a> Params<'a> {
 /// calls [`MaybeParams::set`]. The framework then publishes them back to the
 /// server.
 pub struct MaybeParams<P> {
-    params: Option<P>,
+    inner: MaybeParamsInner<P>,
 }
+
+// SAFETY: `Cached(*const P)` only ever points to a `'static` immutable `P`
+// stored in a `TypeParamsCache<P>`. Sending requires `P: Send + Sync` (owned
+// moves `P`, cached shares `&P`); sharing requires `P: Sync`.
+unsafe impl<P: Send + Sync> Send for MaybeParams<P> {}
+unsafe impl<P: Sync> Sync for MaybeParams<P> {}
 
 impl<P> MaybeParams<P> {
     /// Construct in the unknown state (params to be inferred).
     #[must_use]
     pub fn empty() -> Self {
-        Self { params: None }
+        Self {
+            inner: MaybeParamsInner::Empty,
+        }
     }
 
     /// Construct in the known state.
     #[must_use]
     pub fn present(params: P) -> Self {
         Self {
-            params: Some(params),
+            inner: MaybeParamsInner::Owned(params),
+        }
+    }
+
+    /// Construct in the known state borrowing a `'static` cached entry without
+    /// cloning `P`.
+    fn from_static(params: &'static P) -> Self {
+        Self {
+            inner: MaybeParamsInner::Cached(std::ptr::from_ref(params)),
         }
     }
 
     /// True if the params are already known.
     #[must_use]
     pub fn is_known(&self) -> bool {
-        self.params.is_some()
+        !matches!(self.inner, MaybeParamsInner::Empty)
     }
 
     /// The params, if known.
     #[must_use]
     pub fn get(&self) -> Option<&P> {
-        self.params.as_ref()
+        match &self.inner {
+            MaybeParamsInner::Empty => None,
+            MaybeParamsInner::Owned(p) => Some(p),
+            // SAFETY: `Cached` is only constructed by `from_static` from a
+            // `&'static P` that is never mutated or freed.
+            MaybeParamsInner::Cached(ptr) => Some(unsafe { &**ptr }),
+        }
     }
 
     /// Record the inferred params (transitions unknown to known).
     pub fn set(&mut self, params: P) {
-        self.params = Some(params);
+        self.inner = MaybeParamsInner::Owned(params);
     }
 }
 
@@ -395,11 +424,58 @@ impl Resolved {
     }
 }
 
+const PARAMS_CACHE_BUCKETS: usize = 64;
+const PARAMS_CACHE_PTR_SLOTS: usize = 64;
+const FNV_OFFSET_BASIS: u64 = 14_695_981_039_346_656_037;
+const FNV_PRIME: u64 = 1_099_511_628_211;
+
+struct ParamsCacheNode<P> {
+    key: String,
+    value: P,
+    next: *const ParamsCacheNode<P>,
+}
+
+struct ParamsPtrSlot<P> {
+    keys: *const *const c_char,
+    values: *const *const c_char,
+    count: u32,
+    node: *const ParamsCacheNode<P>,
+}
+
 /// A thread-safe, parse-once cache mapping a canonical params string to its
 /// typed form `P`. One concrete cache exists per parameterized type. The
 /// `parameterized_type!` macro creates a `static` holding it.
+///
+/// Cache hits take no lock and perform no shared writes or allocations:
+///
+/// 1. A per-array-address slot (`ptr_slots`) remembers which entry a pair of
+///    parameter arrays led to and verifies it by content.
+/// 2. On a slot miss, `lookup_raw_node` hashes and compares the raw parameter
+///    pairs directly against a fixed-size, insert-only lock-free bucket table.
+/// 3. Only a true miss (or unsorted raw keys) builds the canonical key string,
+///    runs `parse` outside the lock, and inserts under `insert_mu`.
 pub struct TypeParamsCache<P: 'static> {
-    map: OnceLock<RwLock<HashMap<String, &'static P>>>,
+    buckets: [AtomicPtr<ParamsCacheNode<P>>; PARAMS_CACHE_BUCKETS],
+    ptr_slots: [AtomicPtr<ParamsPtrSlot<P>>; PARAMS_CACHE_PTR_SLOTS],
+    insert_mu: Mutex<()>,
+}
+
+impl<P: 'static> Drop for TypeParamsCache<P> {
+    fn drop(&mut self) {
+        // `PtrSlot` references never escape `get()`, so all slots can be freed
+        // once `&mut self` proves no concurrent reader exists. `ParamsCacheNode`
+        // entries are intentionally leaked for `'static` so `&'static P`
+        // returned by `get()` remains sound even if a non-static cache drops.
+        for slot in &mut self.ptr_slots {
+            let ptr = *slot.get_mut();
+            if !ptr.is_null() {
+                // SAFETY: `ptr` was allocated with `Box::into_raw` in `get()`.
+                unsafe {
+                    drop(Box::from_raw(ptr));
+                }
+            }
+        }
+    }
 }
 
 impl<P: Send + Sync + 'static> TypeParamsCache<P> {
@@ -407,35 +483,180 @@ impl<P: Send + Sync + 'static> TypeParamsCache<P> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            map: OnceLock::new(),
+            buckets: [const { AtomicPtr::new(std::ptr::null_mut()) }; PARAMS_CACHE_BUCKETS],
+            ptr_slots: [const { AtomicPtr::new(std::ptr::null_mut()) }; PARAMS_CACHE_PTR_SLOTS],
+            insert_mu: Mutex::new(()),
         }
     }
 
-    fn map(&self) -> &RwLock<HashMap<String, &'static P>> {
-        self.map.get_or_init(|| RwLock::new(HashMap::new()))
+    fn hash_add(mut h: u64, bytes: &[u8]) -> u64 {
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(FNV_PRIME);
+        }
+        h
+    }
+
+    #[expect(clippy::cast_possible_truncation)]
+    fn bucket_index(hash: u64) -> usize {
+        (hash as usize) & (PARAMS_CACHE_BUCKETS - 1)
+    }
+
+    fn bucket_of(key: &str) -> usize {
+        Self::bucket_index(Self::hash_add(FNV_OFFSET_BASIS, key.as_bytes()))
+    }
+
+    fn ptr_slot_of(raw: TypeParams) -> usize {
+        let k = raw.raw.keys as usize;
+        let v = raw.raw.values as usize;
+        ((k >> 4) ^ (v >> 4) ^ (raw.raw.count as usize)) & (PARAMS_CACHE_PTR_SLOTS - 1)
+    }
+
+    /// True when `key` is `"k1=v1,k2=v2,..."` matching `raw` in `raw`'s order.
+    fn key_equals_raw(key: &str, raw: TypeParams) -> bool {
+        let mut rem = key.as_bytes();
+        for (i, (k, v)) in raw.iter().enumerate() {
+            if i > 0 {
+                let Some(rest) = rem.strip_prefix(b",") else {
+                    return false;
+                };
+                rem = rest;
+            }
+            let Some(rest) = rem.strip_prefix(k.as_bytes()) else {
+                return false;
+            };
+            let Some(rest) = rest.strip_prefix(b"=") else {
+                return false;
+            };
+            let Some(rest) = rest.strip_prefix(v.as_bytes()) else {
+                return false;
+            };
+            rem = rest;
+        }
+        rem.is_empty()
+    }
+
+    /// Look up directly from `raw` with no allocation. Returns `None` on a miss
+    /// or when `raw`'s keys are not strictly sorted (caller then builds the
+    /// canonical key string).
+    fn lookup_raw_node(&self, raw: TypeParams) -> Option<&'static ParamsCacheNode<P>> {
+        let mut h = FNV_OFFSET_BASIS;
+        let mut prev_key: Option<&str> = None;
+        for (k, v) in raw.iter() {
+            if let Some(prev) = prev_key {
+                if prev >= k {
+                    return None;
+                }
+                h = Self::hash_add(h, b",");
+            }
+            h = Self::hash_add(h, k.as_bytes());
+            h = Self::hash_add(h, b"=");
+            h = Self::hash_add(h, v.as_bytes());
+            prev_key = Some(k);
+        }
+        let mut ptr: *const ParamsCacheNode<P> =
+            self.buckets[Self::bucket_index(h)].load(Ordering::Acquire);
+        while !ptr.is_null() {
+            // SAFETY: published nodes are immutable and live for `'static`.
+            let node = unsafe { &*ptr };
+            if Self::key_equals_raw(&node.key, raw) {
+                return Some(node);
+            }
+            ptr = node.next;
+        }
+        None
+    }
+
+    fn lookup_node(&self, key: &str) -> Option<&'static ParamsCacheNode<P>> {
+        let mut ptr: *const ParamsCacheNode<P> =
+            self.buckets[Self::bucket_of(key)].load(Ordering::Acquire);
+        while !ptr.is_null() {
+            // SAFETY: published nodes are immutable and live for `'static`.
+            let node = unsafe { &*ptr };
+            if node.key == key {
+                return Some(node);
+            }
+            ptr = node.next;
+        }
+        None
+    }
+
+    fn insert_node(&self, key: String, value: P) -> &'static ParamsCacheNode<P> {
+        let _guard = self
+            .insert_mu
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Re-check: another thread may have inserted while we waited for the lock.
+        if let Some(hit) = self.lookup_node(&key) {
+            return hit;
+        }
+        let head = &self.buckets[Self::bucket_of(&key)];
+        let next = head.load(Ordering::Relaxed);
+        let node: &'static ParamsCacheNode<P> =
+            Box::leak(Box::new(ParamsCacheNode { key, value, next }));
+        head.store(std::ptr::from_ref(node).cast_mut(), Ordering::Release);
+        node
     }
 
     /// Typed params for `raw`, parsing + caching on first sight.
     pub fn get(&self, raw: TypeParams, parse: fn(Params) -> P) -> &'static P {
-        let key = canonical_key(raw);
-
-        // Fast path: shared read lock; most calls hit an existing entry.
-        if let Some(&p) = self
-            .map()
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&key)
-        {
-            return p;
+        // Fast path: remember which entry these parameter arrays led to. Still
+        // verify by content, because freed and reallocated arrays at the same
+        // addresses can hold different parameters.
+        let slot = &self.ptr_slots[Self::ptr_slot_of(raw)];
+        let slot_ptr = slot.load(Ordering::Acquire);
+        if !slot_ptr.is_null() {
+            // SAFETY: `slot_ptr` is immutable once published and only freed in
+            // `Drop::drop(&mut self)`. Its `node` lives for `'static`.
+            let s = unsafe { &*slot_ptr };
+            if s.keys == raw.raw.keys && s.values == raw.raw.values && s.count == raw.raw.count {
+                let node = unsafe { &*s.node };
+                if Self::key_equals_raw(&node.key, raw) {
+                    return &node.value;
+                }
+            }
         }
 
-        // Miss: run the author's parse with NO lock held, so a panic in it
-        // can't poison the cache. If another thread inserted the same key
-        // meanwhile, keep theirs and drop ours (parse is pure, so they match).
-        let parsed = parse(Params::parse(&key));
-        let mut map = self.map().write().unwrap_or_else(PoisonError::into_inner);
-        map.entry(key)
-            .or_insert_with(|| Box::leak(Box::new(parsed)))
+        let node = if let Some(hit) = self.lookup_raw_node(raw) {
+            hit
+        } else {
+            let key = canonical_key(raw);
+            if let Some(hit) = self.lookup_node(&key) {
+                hit
+            } else {
+                // Run the author's parse with NO lock held, so a panic in it
+                // can't poison the cache.
+                let parsed = parse(Params::parse(&key));
+                self.insert_node(key, parsed)
+            }
+        };
+
+        // Fill an empty address slot once (no churn when two contexts share a
+        // slot) when `raw` matches the node's canonical order.
+        if slot.load(Ordering::Relaxed).is_null() && Self::key_equals_raw(&node.key, raw) {
+            let fresh = Box::into_raw(Box::new(ParamsPtrSlot {
+                keys: raw.raw.keys,
+                values: raw.raw.values,
+                count: raw.raw.count,
+                node: std::ptr::from_ref(node),
+            }));
+            if slot
+                .compare_exchange(
+                    std::ptr::null_mut(),
+                    fresh,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+            {
+                // SAFETY: `fresh` was never published.
+                unsafe {
+                    drop(Box::from_raw(fresh));
+                }
+            }
+        }
+
+        &node.value
     }
 }
 
@@ -1108,8 +1329,9 @@ pub unsafe fn dispatch_agg_result<T>(
 /// # Safety
 /// `args` and `result` must be valid for the duration of the call.
 #[doc(hidden)]
-pub unsafe fn dispatch_from_string_typed<P>(
+pub unsafe fn dispatch_from_string_typed<P: Send + Sync + 'static>(
     encode: fn(&str, &mut MaybeParams<P>) -> Result<Vec<u8>, String>,
+    cache: &'static TypeParamsCache<P>,
     parse: fn(Params) -> P,
     to_strings: fn(&P) -> Vec<(String, String)>,
     args: *mut vef_vdf_args_t,
@@ -1159,8 +1381,7 @@ pub unsafe fn dispatch_from_string_typed<P>(
     let mut maybe = MaybeParams::empty();
     let panic_result1 = std::panic::catch_unwind(AssertUnwindSafe(|| {
         if input_known {
-            let key = canonical_key(TypeParams { raw: input });
-            maybe = MaybeParams::present(parse(Params::parse(&key)));
+            maybe = MaybeParams::from_static(cache.get(TypeParams { raw: input }, parse));
         }
     }));
     report_panic(&panic_result1, "dispatch_from_string_typed_1", &mut *result);
@@ -1209,8 +1430,9 @@ pub unsafe fn dispatch_from_string_typed<P>(
 /// # Safety
 /// `result` must be valid for the duration of the call.
 #[doc(hidden)]
-pub unsafe fn dispatch_intrinsic_default_typed<P>(
+pub unsafe fn dispatch_intrinsic_default_typed<P: Send + Sync + 'static>(
     default_fn: fn(&P) -> Result<String, String>,
+    cache: &'static TypeParamsCache<P>,
     parse: fn(Params) -> P,
     _args: *mut vef_vdf_args_t,
     result: *mut vef_vdf_result_t,
@@ -1221,10 +1443,10 @@ pub unsafe fn dispatch_intrinsic_default_typed<P>(
         // The type params ride on the (binary) result slot, as with from_string.
         let params = {
             let raw = &result.__bindgen_anon_1.__bindgen_anon_2.type_params;
-            parse(Params::parse(&canonical_key(TypeParams { raw })))
+            cache.get(TypeParams { raw }, parse)
         };
 
-        let ret = match default_fn(&params) {
+        let ret = match default_fn(params) {
             Ok(s) => VdfReturn::String(s),
             Err(e) => VdfReturn::error(e),
         };
@@ -2537,7 +2759,12 @@ macro_rules! __vsql_type_vdfs_typed {
                 result: *mut $crate::sys::vef_vdf_result_t,
             ) {
                 $crate::dispatch_from_string_typed(
-                    $enc_fn, $parse_fn, $to_strings_fn, args, result
+                    $enc_fn,
+                    &[< __VSQL_PARAMS_CACHE_ $dec_fn:upper >],
+                    $parse_fn,
+                    $to_strings_fn,
+                    args,
+                    result,
                 );
             }
             static [< __VSQL_FROM_STRING_PARAMS_ $enc_fn:upper >]: &[$crate::Type] =
@@ -2688,7 +2915,13 @@ macro_rules! __vsql_type_vdfs_typed {
                     args: *mut $crate::sys::vef_vdf_args_t,
                     result: *mut $crate::sys::vef_vdf_result_t,
                 ) {
-                    $crate::dispatch_intrinsic_default_typed($default_fn, $parse_fn, args, result);
+                    $crate::dispatch_intrinsic_default_typed(
+                        $default_fn,
+                        &[< __VSQL_PARAMS_CACHE_ $dec_fn:upper >],
+                        $parse_fn,
+                        args,
+                        result,
+                    );
                 }
                 static [< __VSQL_INTRINSIC_DEFAULT_PARAMS_ $default_fn:upper >]: &[$crate::Type] = &[];
             )?
@@ -3184,7 +3417,314 @@ mod tests {
         // Must not poison the cache: the next lookup still works.
         let second = std::panic::catch_unwind(|| *CACHE.get(TypeParams { raw: &raw }, parse_ok));
         assert_eq!(second.ok(), Some(4));
-        assert!(!CACHE.map().is_poisoned());
+        assert!(!CACHE.insert_mu.is_poisoned());
+    }
+
+    #[test]
+    fn params_cache_concurrent_same_entry_per_string_across_threads() {
+        use std::ffi::CString;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct CacheParams {
+            max_size: usize,
+            kind: String,
+        }
+
+        const THREADS: usize = 8;
+        const KEYS: usize = 200; // exceeds PARAMS_CACHE_BUCKETS so chains are exercised
+        const ROUNDS: usize = 5;
+
+        static PARSES: AtomicUsize = AtomicUsize::new(0);
+        static CACHE: TypeParamsCache<CacheParams> = TypeParamsCache::new();
+
+        #[expect(clippy::needless_pass_by_value)]
+        fn parse_cache_params(p: Params) -> CacheParams {
+            PARSES.fetch_add(1, Ordering::Relaxed);
+            CacheParams {
+                max_size: p.get("max_size").unwrap().parse().unwrap(),
+                kind: p.get("type").unwrap().to_string(),
+            }
+        }
+
+        PARSES.store(0, Ordering::Relaxed);
+
+        let sizes: Vec<CString> = (1..=KEYS)
+            .map(|k| CString::new(k.to_string()).unwrap())
+            .collect();
+        let bad = AtomicBool::new(false);
+
+        let seen: Vec<Vec<usize>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..THREADS)
+                .map(|t| {
+                    let sizes = &sizes;
+                    let bad = &bad;
+                    s.spawn(move || {
+                        let mut thread_seen = vec![0usize; KEYS];
+                        let k0 = c"max_size".as_ptr();
+                        let k1 = c"type".as_ptr();
+                        let v1 = c"int32".as_ptr();
+                        for round in 0..ROUNDS {
+                            for i in 0..KEYS {
+                                let k = (i * 7 + t * 13 + round) % KEYS;
+                                let keys = [k0, k1];
+                                let values = [sizes[k].as_ptr(), v1];
+                                let raw = vef_type_params_t {
+                                    count: 2,
+                                    keys: keys.as_ptr(),
+                                    values: values.as_ptr(),
+                                };
+                                let p = CACHE.get(TypeParams { raw: &raw }, parse_cache_params);
+                                if p.max_size != k + 1 || p.kind != "int32" {
+                                    bad.store(true, Ordering::Relaxed);
+                                }
+                                let addr = std::ptr::from_ref(p) as usize;
+                                if thread_seen[k] == 0 {
+                                    thread_seen[k] = addr;
+                                } else if thread_seen[k] != addr {
+                                    bad.store(true, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        thread_seen
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        assert!(!bad.load(Ordering::Relaxed));
+        for row in &seen[1..] {
+            assert_eq!(row, &seen[0]);
+        }
+        let parses = PARSES.load(Ordering::Relaxed);
+        assert!(
+            parses >= KEYS,
+            "expected at least {KEYS} parses, got {parses}"
+        );
+        assert!(
+            parses <= KEYS * THREADS,
+            "expected at most {} parses, got {parses}",
+            KEYS * THREADS
+        );
+
+        // Unsorted raw params reach the exact same cached entry.
+        let keys_unsorted = [c"type".as_ptr(), c"max_size".as_ptr()];
+        let vals_unsorted = [c"int32".as_ptr(), c"7".as_ptr()];
+        let raw_unsorted = vef_type_params_t {
+            count: 2,
+            keys: keys_unsorted.as_ptr(),
+            values: vals_unsorted.as_ptr(),
+        };
+        let p = CACHE.get(TypeParams { raw: &raw_unsorted }, parse_cache_params);
+        assert_eq!(std::ptr::from_ref(p) as usize, seen[0][6]);
+    }
+
+    #[test]
+    fn params_cache_raw_hit_unsorted_and_near_misses() {
+        use std::sync::atomic::AtomicUsize;
+
+        static PARSES: AtomicUsize = AtomicUsize::new(0);
+        fn parse_id(_: Params) -> usize {
+            PARSES.fetch_add(1, Ordering::Relaxed) + 1
+        }
+
+        PARSES.store(0, Ordering::Relaxed);
+        let cache: TypeParamsCache<usize> = TypeParamsCache::new();
+
+        let keys = [c"max_size".as_ptr(), c"type".as_ptr()];
+        let vals = [c"15".as_ptr(), c"int32".as_ptr()];
+        let raw = vef_type_params_t {
+            count: 2,
+            keys: keys.as_ptr(),
+            values: vals.as_ptr(),
+        };
+
+        let first = cache.get(TypeParams { raw: &raw }, parse_id);
+        let second = cache.get(TypeParams { raw: &raw }, parse_id);
+        assert!(std::ptr::eq(first, second));
+        assert_eq!(PARSES.load(Ordering::Relaxed), 1);
+
+        // Unsorted raw params hit the same entry without re-parsing.
+        let keys_u = [c"type".as_ptr(), c"max_size".as_ptr()];
+        let vals_u = [c"int32".as_ptr(), c"15".as_ptr()];
+        let raw_u = vef_type_params_t {
+            count: 2,
+            keys: keys_u.as_ptr(),
+            values: vals_u.as_ptr(),
+        };
+        let unsorted = cache.get(TypeParams { raw: &raw_u }, parse_id);
+        assert!(std::ptr::eq(first, unsorted));
+        assert_eq!(PARSES.load(Ordering::Relaxed), 1);
+
+        // Near misses stay distinct: longer value, fewer keys, empty params.
+        let vals_longer = [c"150".as_ptr(), c"int32".as_ptr()];
+        let raw_longer = vef_type_params_t {
+            count: 2,
+            keys: keys.as_ptr(),
+            values: vals_longer.as_ptr(),
+        };
+        let one_key = [c"max_size".as_ptr()];
+        let one_val = [c"15".as_ptr()];
+        let raw_fewer = vef_type_params_t {
+            count: 1,
+            keys: one_key.as_ptr(),
+            values: one_val.as_ptr(),
+        };
+        let raw_empty: vef_type_params_t = unsafe { std::mem::zeroed() };
+
+        let longer = cache.get(TypeParams { raw: &raw_longer }, parse_id);
+        let fewer = cache.get(TypeParams { raw: &raw_fewer }, parse_id);
+        let none = cache.get(TypeParams { raw: &raw_empty }, parse_id);
+        assert!(!std::ptr::eq(first, longer));
+        assert!(!std::ptr::eq(first, fewer));
+        assert!(!std::ptr::eq(fewer, none));
+        assert_eq!(PARSES.load(Ordering::Relaxed), 4);
+        assert!(std::ptr::eq(
+            none,
+            cache.get(TypeParams { raw: &raw_empty }, parse_id)
+        ));
+        assert_eq!(PARSES.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn params_cache_same_addresses_changed_content_is_not_a_hit() {
+        use std::cell::UnsafeCell;
+        use std::sync::atomic::AtomicUsize;
+
+        static PARSES: AtomicUsize = AtomicUsize::new(0);
+        #[expect(clippy::needless_pass_by_value)]
+        fn parse_id(p: Params) -> usize {
+            let _ = PARSES.fetch_add(1, Ordering::Relaxed);
+            p.get("max_size").unwrap().parse().unwrap()
+        }
+
+        PARSES.store(0, Ordering::Relaxed);
+        let cache: TypeParamsCache<usize> = TypeParamsCache::new();
+
+        let keys = [c"max_size".as_ptr(), c"type".as_ptr()];
+        let size_buf = UnsafeCell::new(*b"15\0\0\0\0\0\0");
+        let values = [size_buf.get().cast::<c_char>(), c"int32".as_ptr()];
+        let raw = vef_type_params_t {
+            count: 2,
+            keys: keys.as_ptr(),
+            values: values.as_ptr(),
+        };
+
+        let first = cache.get(TypeParams { raw: &raw }, parse_id);
+        assert_eq!(*first, 15);
+        assert!(std::ptr::eq(
+            first,
+            cache.get(TypeParams { raw: &raw }, parse_id)
+        ));
+
+        // Overwrite the value string in place at the exact same array addresses.
+        // SAFETY: single-threaded test; no concurrent reader while mutating.
+        unsafe {
+            *size_buf.get() = *b"64\0\0\0\0\0\0";
+        }
+        let changed = cache.get(TypeParams { raw: &raw }, parse_id);
+        assert_eq!(*changed, 64);
+        assert!(!std::ptr::eq(first, changed));
+
+        // Restore original content: returns the original cached entry.
+        // SAFETY: single-threaded test; no concurrent reader while mutating.
+        unsafe {
+            *size_buf.get() = *b"15\0\0\0\0\0\0";
+        }
+        let restored = cache.get(TypeParams { raw: &raw }, parse_id);
+        assert!(std::ptr::eq(first, restored));
+        assert_eq!(PARSES.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn dispatch_from_string_and_intrinsic_default_use_params_cache() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct NumParam {
+            n: usize,
+            _pad: [u8; 16],
+        }
+
+        static PARSES: AtomicUsize = AtomicUsize::new(0);
+        static CACHE: TypeParamsCache<NumParam> = TypeParamsCache::new();
+
+        #[expect(clippy::needless_pass_by_value)]
+        fn parse_n(p: Params) -> NumParam {
+            PARSES.fetch_add(1, Ordering::Relaxed);
+            NumParam {
+                n: p.get("n").unwrap().parse().unwrap(),
+                _pad: [0; 16],
+            }
+        }
+        #[expect(clippy::unnecessary_wraps)]
+        fn encode_n(s: &str, p: &mut MaybeParams<NumParam>) -> Result<Vec<u8>, String> {
+            let n = p.get().unwrap().n;
+            Ok(format!("{s}:{n}").into_bytes())
+        }
+        fn to_strings_n(p: &NumParam) -> Vec<(String, String)> {
+            vec![("n".to_string(), p.n.to_string())]
+        }
+        #[expect(clippy::unnecessary_wraps)]
+        fn default_n(p: &NumParam) -> Result<String, String> {
+            Ok(format!("def:{}", p.n))
+        }
+
+        PARSES.store(0, Ordering::Relaxed);
+
+        let keys = [c"n".as_ptr()];
+        let vals = [c"42".as_ptr()];
+        let raw_params = vef_type_params_t {
+            count: 1,
+            keys: keys.as_ptr(),
+            values: vals.as_ptr(),
+        };
+
+        let mut arg_val = string_invalue(b"hi");
+        let mut arg_ptrs = [&raw mut arg_val];
+        let mut args: vef_vdf_args_t = unsafe { std::mem::zeroed() };
+        args.value_count = 1;
+        args.__bindgen_anon_1.values = arg_ptrs.as_mut_ptr();
+
+        let mut bin_buf = [0u8; 32];
+        let mut res: vef_vdf_result_t = unsafe { std::mem::zeroed() };
+        res.__bindgen_anon_1.__bindgen_anon_2.bin_buf = bin_buf.as_mut_ptr();
+        res.__bindgen_anon_1.__bindgen_anon_2.max_bin_len = bin_buf.len();
+        res.__bindgen_anon_1.__bindgen_anon_2.type_params = raw_params;
+
+        for _ in 0..3 {
+            unsafe {
+                dispatch_from_string_typed(
+                    encode_n,
+                    &CACHE,
+                    parse_n,
+                    to_strings_n,
+                    &raw mut args,
+                    &raw mut res,
+                );
+            }
+            assert_eq!(&bin_buf[..res.actual_len], b"hi:42");
+        }
+        assert_eq!(PARSES.load(Ordering::Relaxed), 1);
+
+        // intrinsic_default_typed hits the same cached entry (no second parse).
+        let mut str_buf = [0u8; 32];
+        let mut def_res: vef_vdf_result_t = unsafe { std::mem::zeroed() };
+        def_res.__bindgen_anon_1.__bindgen_anon_1.str_buf = str_buf.as_mut_ptr().cast::<c_char>();
+        def_res.__bindgen_anon_1.__bindgen_anon_1.max_str_len = str_buf.len();
+        def_res.__bindgen_anon_1.__bindgen_anon_2.type_params = raw_params;
+
+        unsafe {
+            dispatch_intrinsic_default_typed(
+                default_n,
+                &CACHE,
+                parse_n,
+                &raw mut args,
+                &raw mut def_res,
+            );
+        }
+        assert_eq!(&str_buf[..def_res.actual_len], b"def:42");
+        assert_eq!(PARSES.load(Ordering::Relaxed), 1);
     }
 
     // -- Params::parse: turns "k=v,k=v" into looked-up pairs ---
